@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SGC - Sistema de Gerenciamento de Compras</title>
+  <!-- Bootstrap 5 + Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- SheetJS -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+  <!-- jsPDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    body { background: #f4f6f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    .sidebar { min-height: 100vh; background: #2c3e50; color: #ecf0f1; }
+    .sidebar .nav-link { color: #bdc3c7; }
+    .sidebar .nav-link:hover, .sidebar .nav-link.active { background: #34495e; color: #fff; }
+    .sidebar .nav-link i { margin-right: 8px; }
+    .main-content { padding: 20px; }
+    .card { border: none; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .card-header { background: transparent; border-bottom: 1px solid #e9ecef; font-weight: 600; }
+    .badge-status { padding: 5px 12px; border-radius: 20px; font-weight: 500; }
+    .badge-verde { background: #d4edda; color: #155724; }
+    .badge-amarelo { background: #fff3cd; color: #856404; }
+    .badge-vermelho { background: #f8d7da; color: #721c24; }
+    .table th { background: #f8f9fa; }
+    .btn-primary { background: #2c3e50; border-color: #2c3e50; }
+    .btn-primary:hover { background: #1a252f; border-color: #1a252f; }
+    .status-circle { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
+    .status-verde { background: #28a745; }
+    .status-amarelo { background: #ffc107; }
+    .status-vermelho { background: #dc3545; }
+    .fade-in { animation: fadeIn 0.3s; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .loading { display: none; text-align: center; padding: 30px; }
+    .loading.show { display: block; }
+    .page-section { display: none; }
+    .page-section.active { display: block; }
+    .import-preview { max-height: 400px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+
+<div class="container-fluid">
+  <div class="row">
+    <!-- SIDEBAR -->
+    <nav class="col-md-2 d-md-block sidebar p-0">
+      <div class="p-3">
+        <h5 class="text-white"><i class="bi bi-box-seam"></i> SGC</h5>
+        <small class="text-muted">Sistema de Compras</small>
+      </div>
+      <ul class="nav flex-column">
+        <li class="nav-item"><a href="#" class="nav-link active" data-page="dashboard"><i class="bi bi-speedometer2"></i> Dashboard</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="produtos"><i class="bi bi-cube"></i> Produtos</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="necessidade"><i class="bi bi-cart-check"></i> Necessidade de Compra</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="fornecedores"><i class="bi bi-truck"></i> Fornecedores</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="cotacoes"><i class="bi bi-currency-dollar"></i> Cotações</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="pedidos"><i class="bi bi-receipt"></i> Pedidos</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="historico"><i class="bi bi-clock-history"></i> Histórico</a></li>
+        <li class="nav-item"><a href="#" class="nav-link" data-page="importar"><i class="bi bi-file-earmark-excel"></i> Importar</a></li>
+      </ul>
+    </nav>
+
+    <!-- MAIN CONTENT -->
+    <main class="col-md-10 ms-sm-auto px-md-4 main-content">
+      <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+        <h1 class="h2" id="pageTitle">Dashboard</h1>
+        <div>
+          <span class="badge bg-secondary me-2" id="statusDB">Offline</span>
+          <button class="btn btn-outline-secondary btn-sm" id="btnLimparDados"><i class="bi bi-trash"></i> Limpar Dados</button>
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div id="loading" class="loading show">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-2">Carregando...</p>
+      </div>
+
+      <!-- PÁGINAS -->
+      <div id="page-dashboard" class="page-section active"></div>
+      <div id="page-produtos" class="page-section"></div>
+      <div id="page-necessidade" class="page-section"></div>
+      <div id="page-fornecedores" class="page-section"></div>
+      <div id="page-cotacoes" class="page-section"></div>
+      <div id="page-pedidos" class="page-section"></div>
+      <div id="page-historico" class="page-section"></div>
+      <div id="page-importar" class="page-section"></div>
+    </main>
+  </div>
+</div>
+
+<script>
+  // ============================================================
+  // 1. CONFIGURAÇÃO E ESTADO GLOBAL
+  // ============================================================
+  const DB_NAME = 'SGC_DB';
+  const DB_VERSION = 1;
+  let db = null;
+  let currentPage = 'dashboard';
+
+  const STORES = ['produtos', 'fornecedores', 'cotacoes', 'pedidos', 'historicos'];
+
+  // ============================================================
+  // 2. INICIALIZAÇÃO DO INDEXEDDB
+  // ============================================================
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        STORES.forEach(storeName => {
+          if (!db.objectStoreNames.contains(storeName)) {
+            db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+          }
+        });
+      };
+      request.onsuccess = (e) => { db = e.target.result; resolve(db); };
+      request.onerror = (e) => reject(e.target.error);
+    });
+  }
+
+  // ============================================================
+  // 3. FUNÇÕES CRUD GENÉRICAS
+  // ============================================================
+  function getAll(storeName) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function getById(storeName, id) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.get(id);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function add(storeName, data) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const req = store.add(data);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function put(storeName, data) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const req = store.put(data);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function del(storeName, id) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const req = store.delete(id);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function clearStore(storeName) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readwrite');
+      const store = tx.objectStore(storeName);
+      const req = store.clear();
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // ============================================================
+  // 4. LÓGICA DE NEGÓCIO
+  // ============================================================
+  function calcularConsumoSemanal(consumoMensal) {
+    return parseFloat(((consumoMensal * 12) / 52).toFixed(2));
+  }
+
+  function calcularConsumoDiario(consumoSemanal) {
+    return parseFloat((consumoSemanal / 7).toFixed(2));
+  }
+
+  function calcularEstoqueMinimo(consumoDiario, prazoEntrega = 3, margemSeguranca = 0.2) {
+    return Math.ceil(consumoDiario * prazoEntrega * (1 + margemSeguranca));
+  }
+
+  function calcularDiasEstoque(estoqueAtual, consumoDiario) {
+    if (consumoDiario === 0) return Infinity;
+    return parseFloat((estoqueAtual / consumoDiario).toFixed(1));
+  }
+
+  function calcularStatus(dias) {
+    if (dias > 7) return 'VERDE';
+    if (dias >= 4) return 'AMARELO';
+    return 'VERMELHO';
+  }
+
+  function quantidadeSugerida(consumoSemanal, estoqueMinimo, estoqueAtual) {
+    return Math.max(0, consumoSemanal + estoqueMinimo - estoqueAtual);
+  }
+
+  // ============================================================
+  // 5. IMPORTAÇÃO DA PLANILHA (CORRIGIDA)
+  // ============================================================
+  function importarPlanilha(arrayBuffer) {
+    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+
+    const produtos = [];
+    let i = 0;
+    while (i < data.length) {
+      const row = data[i];
+      // Procura linha que contenha "Código(s):" (com ou sem parênteses e dois pontos)
+      if (row.length > 0 && typeof row[0] === 'string' && /código\(s\)\s*:/i.test(row[0])) {
+        // Descrição: linha anterior (não vazia)
+        let descricao = '';
+        let j = i - 1;
+        while (j >= 0 && data[j].length > 0 && data[j][0].trim() === '') j--;
+        if (j >= 0 && data[j].length > 0) {
+          descricao = data[j][0].trim();
+        }
+
+        // Extrai código
+        const codigoMatch = row[0].match(/código\(s\)\s*:\s*(.*)/i);
+        const codigo = codigoMatch ? codigoMatch[1].trim() : '';
+
+        // Avança até o cabeçalho "Pedido"
+        while (i < data.length && data[i].length > 0 && data[i][0] !== 'Pedido') i++;
+        if (i >= data.length) break;
+        i++; // pula o cabeçalho
+
+        // Lê pedidos (ignoramos, mas pulamos até a linha de resumo)
+        while (i < data.length && data[i].length > 0 && data[i][0] !== '' && !/em compras|disponivel|média mês|saldo/i.test(data[i].join(' '))) {
+          i++;
+        }
+
+        // Procura linha de resumo
+        let resumo = { disponivel: 0, mediaMes: 0 };
+        // Se a linha atual já tem "DISPONIVEL" ou "MÉDIA MÊS", usa ela
+        if (i < data.length) {
+          const r = data[i];
+          // Tenta identificar "DISPONIVEL" e "MÉDIA MÊS" na linha
+          let foundDisponivel = false, foundMedia = false;
+          for (let k = 0; k < r.length; k++) {
+            if (typeof r[k] === 'string' && /disponivel/i.test(r[k])) {
+              const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
+              if (val > 0) { resumo.disponivel = val; foundDisponivel = true; }
+            }
+            if (typeof r[k] === 'string' && /média mês|media/i.test(r[k])) {
+              const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
+              if (val > 0) { resumo.mediaMes = val; foundMedia = true; }
+            }
+          }
+          // Se não encontrou, tenta posições fixas (comuns no relatório)
+          if (!foundDisponivel && r[17] !== undefined) resumo.disponivel = parseFloat(r[17]) || 0;
+          if (!foundMedia && r[25] !== undefined) resumo.mediaMes = parseFloat(r[25]) || 0;
+          // Último recurso: procurar "SALDO" no final
+          if (resumo.disponivel === 0) {
+            for (let k = 0; k < r.length; k++) {
+              if (typeof r[k] === 'string' && /saldo/i.test(r[k])) {
+                const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
+                if (val > 0) { resumo.disponivel = val; break; }
+              }
+            }
+          }
+        }
+
+        if (descricao) {
+          produtos.push({
+            codigo: codigo,
+            descricao: descricao,
+            estoque_atual: resumo.disponivel || 0,
+            consumo_medio_mensal: resumo.mediaMes || 0,
+            categoria: '',
+            unidade: '',
+            fornecedor_id: null,
+            ultimo_preco: 0,
+            data_ultima_compra: null,
+          });
+        }
+      }
+      i++;
+    }
+    return produtos;
+  }
+
+  // ============================================================
+  // 6. RENDERIZAÇÃO DAS PÁGINAS
+  // ============================================================
+  async function renderDashboard() {
+    const produtos = await getAll('produtos');
+    const pedidos = await getAll('pedidos');
+    const historicos = await getAll('historicos');
+    const fornecedores = await getAll('fornecedores');
+
+    const totalCompradoMes = historicos.filter(h => {
+      const d = new Date(h.data);
+      const now = new Date();
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    }).reduce((sum, h) => sum + h.total, 0);
+
+    const criticos = produtos.filter(p => {
+      const dias = calcularDiasEstoque(p.estoque_atual, calcularConsumoDiario(calcularConsumoSemanal(p.consumo_medio_mensal)));
+      return dias < 3;
+    });
+
+    const abaixoMinimo = produtos.filter(p => {
+      const consDiario = calcularConsumoDiario(calcularConsumoSemanal(p.consumo_medio_mensal));
+      const min = calcularEstoqueMinimo(consDiario);
+      return p.estoque_atual < min;
+    });
+
+    const ultimas = historicos.sort((a,b) => new Date(b.data) - new Date(a.data)).slice(0,5);
+
+    const html = `
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <div class="card p-3">
+            <h6 class="text-muted">Total Comprado no Mês</h6>
+            <h3>R$ ${totalCompradoMes.toFixed(2)}</h3>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card p-3">
+            <h6 class="text-muted">Produtos Críticos</h6>
+            <h3>${criticos.length}</h3>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card p-3">
+            <h6 class="text-muted">Abaixo do Estoque Mínimo</h6>
+            <h3>${abaixoMinimo.length}</h3>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card p-3">
+            <h6 class="text-muted">Fornecedores</h6>
+            <h3>${fornecedores.length}</h3>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">Últimas Compras</div>
+            <div class="card-body">
+              <table class="table table-sm">
+                <thead><tr><th>Data</th><th>Produto</th><th>Total</th></tr></thead>
+                <tbody>
+                  ${ultimas.map(h => `
+                    <tr>
+                      <td>${h.data}</td>
+                      <td>${h.produto_id}</td>
+                      <td>R$ ${h.total.toFixed(2)}</td>
+                    </tr>
+                  `).join('')}
+                  ${ultimas.length === 0 ? '<tr><td colspan="3" class="text-center">Nenhuma compra registrada</td></tr>' : ''}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">Produtos com Estoque Crítico</div>
+            <div class="card-body">
+              <ul class="list-group">
+                ${criticos.slice(0,5).map(p => `
+                  <li class="list-group-item d-flex justify-content-between align-items-center">
+                    ${p.descricao}
+                    <span class="badge bg-danger">${p.estoque_atual} un</span>
+                  </li>
+                `).join('')}
+                ${criticos.length === 0 ? '<li class="list-group-item text-center">Nenhum produto crítico</li>' : ''}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('page-dashboard').innerHTML = html;
+  }
+
+  async function renderProdutos() {
+    const produtos = await getAll('produtos');
+    const fornecedores = await getAll('fornecedores');
+    const fornecedorMap = {};
+    fornecedores.forEach(f => fornecedorMap[f.id] = f.nome);
+
+    let html = `
+      <div class="d-flex justify-content-between mb-3">
+        <h4>Produtos</h4>
+        <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#modalProduto">+ Novo Produto</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-bordered table-hover">
+          <thead>
+            <tr><th>Código</th><th>Descrição</th><th>Estoque</th><th>Consumo Semanal</th><th>Dias Estoque</th><th>Status</th><th>Fornecedor</th><th>Ações</th></tr>
+          </thead>
+          <tbody>
+    `;
+    produtos.forEach(p => {
+      const consSem = calcularConsumoSemanal(p.consumo_medio_mensal);
+      const consDiario = calcularConsumoDiario(consSem);
+      const dias = calcularDiasEstoque(p.estoque_atual, consDiario);
+      const status = calcularStatus(dias);
+      const badge = `badge-status badge-${status.toLowerCase()}`;
+      const fornecedorNome = p.fornecedor_id ? fornecedorMap[p.fornecedor_id] || 'Não definido' : 'Não definido';
+      html += `
+        <tr>
+          <td>${p.codigo || ''}</td>
+          <td>${p.descricao}</td>
+          <td>${p.estoque_atual}</td>
+          <td>${consSem.toFixed(2)}</td>
+          <td>${dias === Infinity ? '∞' : dias.toFixed(1)}</td>
+          <td><span class="${badge}">${status}</span></td>
+          <td>${fornecedorNome}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-primary editar-produto" data-id="${p.id}"><i class="bi bi-pencil"></i></button>
+            <button class="btn btn-sm btn-outline-danger excluir-produto" data-id="${p.id}"><i class="bi bi-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-produtos').innerHTML = html;
+
+    document.querySelectorAll('.editar-produto').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        const produto = await getById('produtos', id);
+        if (produto) abrirModalProduto(produto);
+      });
+    });
+    document.querySelectorAll('.excluir-produto').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (confirm('Deseja excluir este produto?')) {
+          await del('produtos', parseInt(btn.dataset.id));
+          renderProdutos();
+        }
+      });
+    });
+  }
+
+  async function renderNecessidade() {
+    const produtos = await getAll('produtos');
+    const fornecedores = await getAll('fornecedores');
+    const fornecedorMap = {};
+    fornecedores.forEach(f => fornecedorMap[f.id] = f.nome);
+
+    let html = `
+      <h4>Necessidade de Compra</h4>
+      <p class="text-muted">Sugestão de compra para suprir 1 semana + estoque mínimo</p>
+      <div class="table-responsive">
+        <table class="table table-bordered">
+          <thead>
+            <tr><th>Produto</th><th>Estoque Atual</th><th>Consumo Semanal</th><th>Dias Estoque</th><th>Estoque Mínimo</th><th>Qtd. Sugerida</th><th>Fornecedor</th><th>Ação</th></tr>
+          </thead>
+          <tbody>
+    `;
+    produtos.forEach(p => {
+      const consSem = calcularConsumoSemanal(p.consumo_medio_mensal);
+      const consDiario = calcularConsumoDiario(consSem);
+      const dias = calcularDiasEstoque(p.estoque_atual, consDiario);
+      const min = calcularEstoqueMinimo(consDiario);
+      const sugerida = quantidadeSugerida(consSem, min, p.estoque_atual);
+      const status = calcularStatus(dias);
+      const badge = `badge-status badge-${status.toLowerCase()}`;
+      const fornecedorNome = p.fornecedor_id ? fornecedorMap[p.fornecedor_id] || 'Não definido' : 'Não definido';
+      html += `
+        <tr>
+          <td>${p.descricao}</td>
+          <td>${p.estoque_atual}</td>
+          <td>${consSem.toFixed(2)}</td>
+          <td>${dias === Infinity ? '∞' : dias.toFixed(1)} <span class="${badge}">${status}</span></td>
+          <td>${min}</td>
+          <td><input type="number" class="form-control form-control-sm qtd-sugerida" value="${Math.ceil(sugerida)}" style="width:100px;" data-id="${p.id}"></td>
+          <td>${fornecedorNome}</td>
+          <td><button class="btn btn-sm btn-success gerar-pedido" data-id="${p.id}"><i class="bi bi-cart-plus"></i> Gerar Pedido</button></td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-necessidade').innerHTML = html;
+
+    document.querySelectorAll('.gerar-pedido').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const produtoId = parseInt(btn.dataset.id);
+        const input = document.querySelector(`.qtd-sugerida[data-id="${produtoId}"]`);
+        const quantidade = parseInt(input.value) || 0;
+        if (quantidade <= 0) { alert('Quantidade deve ser maior que zero'); return; }
+        const produto = await getById('produtos', produtoId);
+        if (!produto) return;
+        if (!produto.fornecedor_id) { alert('Produto sem fornecedor definido. Cadastre um fornecedor primeiro.'); return; }
+        const pedido = {
+          data: new Date().toISOString().split('T')[0],
+          fornecedor_id: produto.fornecedor_id,
+          itens: [{ produto_id: produtoId, quantidade: quantidade, preco_unitario: produto.ultimo_preco || 0, total: (produto.ultimo_preco || 0) * quantidade }],
+          total: (produto.ultimo_preco || 0) * quantidade,
+          status: 'Pendente'
+        };
+        await add('pedidos', pedido);
+        alert('Pedido gerado com sucesso!');
+        renderNecessidade();
+      });
+    });
+  }
+
+  async function renderFornecedores() {
+    const fornecedores = await getAll('fornecedores');
+    let html = `
+      <div class="d-flex justify-content-between mb-3">
+        <h4>Fornecedores</h4>
+        <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#modalFornecedor">+ Novo Fornecedor</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-bordered">
+          <thead><tr><th>Nome</th><th>Contato</th><th>Telefone</th><th>Prazo (dias)</th><th>Ações</th></tr></thead>
+          <tbody>
+    `;
+    fornecedores.forEach(f => {
+      html += `
+        <tr>
+          <td>${f.nome}</td>
+          <td>${f.contato || ''}</td>
+          <td>${f.telefone || ''}</td>
+          <td>${f.prazo_entrega || 3}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-primary editar-fornecedor" data-id="${f.id}"><i class="bi bi-pencil"></i></button>
+            <button class="btn btn-sm btn-outline-danger excluir-fornecedor" data-id="${f.id}"><i class="bi bi-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-fornecedores').innerHTML = html;
+
+    document.querySelectorAll('.editar-fornecedor').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        const f = await getById('fornecedores', id);
+        if (f) abrirModalFornecedor(f);
+      });
+    });
+    document.querySelectorAll('.excluir-fornecedor').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (confirm('Deseja excluir este fornecedor?')) {
+          await del('fornecedores', parseInt(btn.dataset.id));
+          renderFornecedores();
+        }
+      });
+    });
+  }
+
+  async function renderCotacoes() {
+    const cotacoes = await getAll('cotacoes');
+    const produtos = await getAll('produtos');
+    const fornecedores = await getAll('fornecedores');
+    const prodMap = {}; produtos.forEach(p => prodMap[p.id] = p.descricao);
+    const fornMap = {}; fornecedores.forEach(f => fornMap[f.id] = f.nome);
+
+    let html = `
+      <div class="d-flex justify-content-between mb-3">
+        <h4>Cotações</h4>
+        <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#modalCotacao">+ Nova Cotação</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-bordered">
+          <thead><tr><th>Data</th><th>Produto</th><th>Fornecedor</th><th>Preço</th><th>Quantidade</th><th>Prazo</th><th>Ações</th></tr></thead>
+          <tbody>
+    `;
+    cotacoes.forEach(c => {
+      html += `
+        <tr>
+          <td>${c.data}</td>
+          <td>${prodMap[c.produto_id] || c.produto_id}</td>
+          <td>${fornMap[c.fornecedor_id] || c.fornecedor_id}</td>
+          <td>R$ ${c.preco.toFixed(2)}</td>
+          <td>${c.quantidade}</td>
+          <td>${c.prazo_entrega}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-danger excluir-cotacao" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-cotacoes').innerHTML = html;
+
+    document.querySelectorAll('.excluir-cotacao').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (confirm('Excluir cotação?')) {
+          await del('cotacoes', parseInt(btn.dataset.id));
+          renderCotacoes();
+        }
+      });
+    });
+  }
+
+  async function renderPedidos() {
+    const pedidos = await getAll('pedidos');
+    const fornecedores = await getAll('fornecedores');
+    const produtos = await getAll('produtos');
+    const fornMap = {}; fornecedores.forEach(f => fornMap[f.id] = f.nome);
+    const prodMap = {}; produtos.forEach(p => prodMap[p.id] = p.descricao);
+
+    let html = `
+      <h4>Pedidos de Compra</h4>
+      <div class="table-responsive">
+        <table class="table table-bordered">
+          <thead><tr><th>Data</th><th>Fornecedor</th><th>Itens</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead>
+          <tbody>
+    `;
+    pedidos.forEach(ped => {
+      const itensStr = ped.itens.map(item => `${prodMap[item.produto_id] || item.produto_id} (${item.quantidade})`).join('; ');
+      html += `
+        <tr>
+          <td>${ped.data}</td>
+          <td>${fornMap[ped.fornecedor_id] || ped.fornecedor_id}</td>
+          <td>${itensStr}</td>
+          <td>R$ ${ped.total.toFixed(2)}</td>
+          <td>${ped.status}</td>
+          <td>
+            <button class="btn btn-sm btn-outline-success finalizar-pedido" data-id="${ped.id}"><i class="bi bi-check"></i> Receber</button>
+            <button class="btn btn-sm btn-outline-secondary imprimir-pedido" data-id="${ped.id}"><i class="bi bi-printer"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-pedidos').innerHTML = html;
+
+    document.querySelectorAll('.finalizar-pedido').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        const pedido = await getById('pedidos', id);
+        if (!pedido) return;
+        pedido.status = 'Recebido';
+        await put('pedidos', pedido);
+        for (const item of pedido.itens) {
+          await add('historicos', {
+            data: pedido.data,
+            produto_id: item.produto_id,
+            fornecedor_id: pedido.fornecedor_id,
+            quantidade: item.quantidade,
+            preco_unitario: item.preco_unitario,
+            total: item.total
+          });
+        }
+        for (const item of pedido.itens) {
+          const produto = await getById('produtos', item.produto_id);
+          if (produto) {
+            produto.estoque_atual += item.quantidade;
+            produto.ultimo_preco = item.preco_unitario;
+            produto.data_ultima_compra = pedido.data;
+            await put('produtos', produto);
+          }
+        }
+        renderPedidos();
+        renderDashboard();
+      });
+    });
+
+    document.querySelectorAll('.imprimir-pedido').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        const pedido = await getById('pedidos', id);
+        if (!pedido) return;
+        const win = window.open('', '_blank');
+        win.document.write(`
+          <html><head><title>Pedido ${id}</title><style>body { font-family: Arial; } table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }</style></head>
+          <body>
+            <h1>Pedido de Compra #${id}</h1>
+            <p>Data: ${pedido.data}</p>
+            <p>Fornecedor: ${fornMap[pedido.fornecedor_id] || pedido.fornecedor_id}</p>
+            <table><thead><tr><th>Produto</th><th>Quantidade</th><th>Preço Unit.</th><th>Total</th></tr></thead><tbody>
+              ${pedido.itens.map(item => `
+                <tr><td>${prodMap[item.produto_id] || item.produto_id}</td><td>${item.quantidade}</td><td>R$ ${item.preco_unitario.toFixed(2)}</td><td>R$ ${item.total.toFixed(2)}</td></tr>
+              `).join('')}
+            </tbody></table>
+            <p><strong>Total: R$ ${pedido.total.toFixed(2)}</strong></p>
+          </body></html>
+        `);
+        win.document.close();
+        win.print();
+      });
+    });
+  }
+
+  async function renderHistorico() {
+    const historicos = await getAll('historicos');
+    const produtos = await getAll('produtos');
+    const prodMap = {}; produtos.forEach(p => prodMap[p.id] = p.descricao);
+
+    let html = `
+      <h4>Histórico de Compras</h4>
+      <div class="table-responsive">
+        <table class="table table-bordered">
+          <thead><tr><th>Data</th><th>Produto</th><th>Quantidade</th><th>Preço Unit.</th><th>Total</th></tr></thead>
+          <tbody>
+    `;
+    historicos.forEach(h => {
+      html += `
+        <tr>
+          <td>${h.data}</td>
+          <td>${prodMap[h.produto_id] || h.produto_id}</td>
+          <td>${h.quantidade}</td>
+          <td>R$ ${h.preco_unitario.toFixed(2)}</td>
+          <td>R$ ${h.total.toFixed(2)}</td>
+        </tr>
+      `;
+    });
+    html += `</tbody></table></div>`;
+    document.getElementById('page-historico').innerHTML = html;
+  }
+
+  // ============================================================
+  // 7. PÁGINA DE IMPORTAÇÃO (COM PRÉVIA E CONFIRMAÇÃO)
+  // ============================================================
+  async function renderImportar() {
+    let html = `
+      <h4>Importar Planilha Excel</h4>
+      <p class="text-muted">Selecione o arquivo .xlsx do relatório de necessidade de compras.</p>
+      <div class="card p-4">
+        <input type="file" class="form-control" id="fileInput" accept=".xlsx">
+        <button class="btn btn-primary mt-3" id="btnImportar">Importar</button>
+        <div id="importPreview" class="mt-3"></div>
+      </div>
+    `;
+    document.getElementById('page-importar').innerHTML = html;
+
+    document.getElementById('btnImportar').addEventListener('click', async () => {
+      const fileInput = document.getElementById('fileInput');
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert('Selecione um arquivo.');
+        return;
+      }
+      const file = fileInput.files[0];
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const produtos = importarPlanilha(data.buffer);
+          if (produtos.length === 0) {
+            document.getElementById('importPreview').innerHTML = `
+              <div class="alert alert-warning">Nenhum produto encontrado. Verifique se a planilha contém "Código(s):" e os campos esperados.</div>
+            `;
+            return;
+          }
+          let preview = `<h6>${produtos.length} produtos encontrados</h6>
+            <div class="table-responsive" style="max-height:300px; overflow-y:auto;">
+            <table class="table table-sm table-bordered">
+              <thead><tr><th>Código</th><th>Descrição</th><th>Estoque</th><th>Média Mensal</th></tr></thead>
+              <tbody>`;
+          produtos.slice(0,20).forEach(p => {
+            preview += `<tr><td>${p.codigo}</td><td>${p.descricao.substring(0,60)}</td><td>${p.estoque_atual}</td><td>${p.consumo_medio_mensal}</td></tr>`;
+          });
+          preview += `</tbody></table></div>`;
+          if (produtos.length > 20) preview += `<p class="text-muted">... e mais ${produtos.length - 20} produtos</p>`;
+          preview += `<button class="btn btn-success mt-2" id="confirmarImportacao">Confirmar Importação</button>`;
+          document.getElementById('importPreview').innerHTML = preview;
+
+          document.getElementById('confirmarImportacao').addEventListener('click', async () => {
+            for (const p of produtos) {
+              await add('produtos', p);
+            }
+            alert(`${produtos.length} produtos importados com sucesso!`);
+            document.getElementById('importPreview').innerHTML = '';
+            renderDashboard();
+            renderProdutos();
+            renderNecessidade();
+          });
+        } catch (err) {
+          document.getElementById('importPreview').innerHTML = `<div class="alert alert-danger">Erro ao ler o arquivo: ${err.message}</div>`;
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  // ============================================================
+  // 8. MODAIS (CRUD)
+  // ============================================================
+  function abrirModalProduto(produto = null) {
+    const isEdit = !!produto;
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'modalProduto';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">${isEdit ? 'Editar' : 'Novo'} Produto</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="produtoId" value="${isEdit ? produto.id : ''}">
+            <div class="mb-2"><label>Código</label><input class="form-control" id="produtoCodigo" value="${isEdit ? produto.codigo : ''}"></div>
+            <div class="mb-2"><label>Descrição</label><input class="form-control" id="produtoDescricao" value="${isEdit ? produto.descricao : ''}"></div>
+            <div class="mb-2"><label>Categoria</label><input class="form-control" id="produtoCategoria" value="${isEdit ? produto.categoria : ''}"></div>
+            <div class="mb-2"><label>Unidade</label><input class="form-control" id="produtoUnidade" value="${isEdit ? produto.unidade : ''}"></div>
+            <div class="mb-2"><label>Estoque Atual</label><input type="number" class="form-control" id="produtoEstoque" value="${isEdit ? produto.estoque_atual : 0}"></div>
+            <div class="mb-2"><label>Consumo Médio Mensal</label><input type="number" class="form-control" id="produtoConsumo" value="${isEdit ? produto.consumo_medio_mensal : 0}"></div>
+            <div class="mb-2"><label>Último Preço</label><input type="number" step="0.01" class="form-control" id="produtoPreco" value="${isEdit ? produto.ultimo_preco : 0}"></div>
+            <div class="mb-2"><label>Fornecedor (ID)</label><input type="number" class="form-control" id="produtoFornecedor" value="${isEdit ? produto.fornecedor_id : ''}"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="salvarProduto">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const modalInstance = new bootstrap.Modal(modal);
+    modalInstance.show();
+
+    document.getElementById('salvarProduto').addEventListener('click', async () => {
+      const id = document.getElementById('produtoId').value;
+      const codigo = document.getElementById('produtoCodigo').value;
+      const descricao = document.getElementById('produtoDescricao').value;
+      const categoria = document.getElementById('produtoCategoria').value;
+      const unidade = document.getElementById('produtoUnidade').value;
+      const estoque_atual = parseFloat(document.getElementById('produtoEstoque').value) || 0;
+      const consumo_medio_mensal = parseFloat(document.getElementById('produtoConsumo').value) || 0;
+      const ultimo_preco = parseFloat(document.getElementById('produtoPreco').value) || 0;
+      const fornecedor_id = parseInt(document.getElementById('produtoFornecedor').value) || null;
+
+      const data = { codigo, descricao, categoria, unidade, estoque_atual, consumo_medio_mensal, ultimo_preco, fornecedor_id };
+      if (id) {
+        data.id = parseInt(id);
+        await put('produtos', data);
+      } else {
+        await add('produtos', data);
+      }
+      modalInstance.hide();
+      renderProdutos();
+      renderNecessidade();
+      renderDashboard();
+    });
+
+    modal.addEventListener('hidden.bs.modal', () => modal.remove());
+  }
+
+  function abrirModalFornecedor(fornecedor = null) {
+    const isEdit = !!fornecedor;
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'modalFornecedor';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">${isEdit ? 'Editar' : 'Novo'} Fornecedor</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="fornecedorId" value="${isEdit ? fornecedor.id : ''}">
+            <div class="mb-2"><label>Nome</label><input class="form-control" id="fornecedorNome" value="${isEdit ? fornecedor.nome : ''}"></div>
+            <div class="mb-2"><label>Contato</label><input class="form-control" id="fornecedorContato" value="${isEdit ? fornecedor.contato : ''}"></div>
+            <div class="mb-2"><label>Telefone</label><input class="form-control" id="fornecedorTelefone" value="${isEdit ? fornecedor.telefone : ''}"></div>
+            <div class="mb-2"><label>Prazo Entrega (dias)</label><input type="number" class="form-control" id="fornecedorPrazo" value="${isEdit ? fornecedor.prazo_entrega : 3}"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="salvarFornecedor">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const modalInstance = new bootstrap.Modal(modal);
+    modalInstance.show();
+
+    document.getElementById('salvarFornecedor').addEventListener('click', async () => {
+      const id = document.getElementById('fornecedorId').value;
+      const nome = document.getElementById('fornecedorNome').value;
+      const contato = document.getElementById('fornecedorContato').value;
+      const telefone = document.getElementById('fornecedorTelefone').value;
+      const prazo_entrega = parseInt(document.getElementById('fornecedorPrazo').value) || 3;
+
+      const data = { nome, contato, telefone, prazo_entrega };
+      if (id) {
+        data.id = parseInt(id);
+        await put('fornecedores', data);
+      } else {
+        await add('fornecedores', data);
+      }
+      modalInstance.hide();
+      renderFornecedores();
+    });
+
+    modal.addEventListener('hidden.bs.modal', () => modal.remove());
+  }
+
+  function abrirModalCotacao(cotacao = null) {
+    alert('Funcionalidade de cotação será implementada via modal.');
+  }
+
+  // ============================================================
+  // 9. NAVEGAÇÃO E INICIALIZAÇÃO
+  // ============================================================
+  async function navigate(page) {
+    currentPage = page;
+    document.querySelectorAll('.page-section').forEach(el => el.classList.remove('active'));
+    document.getElementById(`page-${page}`).classList.add('active');
+    document.querySelectorAll('.sidebar .nav-link').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.sidebar .nav-link[data-page="${page}"]`)?.classList.add('active');
+
+    const titles = {
+      dashboard: 'Dashboard',
+      produtos: 'Produtos',
+      necessidade: 'Necessidade de Compra',
+      fornecedores: 'Fornecedores',
+      cotacoes: 'Cotações',
+      pedidos: 'Pedidos',
+      historico: 'Histórico',
+      importar: 'Importar'
+    };
+    document.getElementById('pageTitle').textContent = titles[page] || page;
+
+    switch (page) {
+      case 'dashboard': await renderDashboard(); break;
+      case 'produtos': await renderProdutos(); break;
+      case 'necessidade': await renderNecessidade(); break;
+      case 'fornecedores': await renderFornecedores(); break;
+      case 'cotacoes': await renderCotacoes(); break;
+      case 'pedidos': await renderPedidos(); break;
+      case 'historico': await renderHistorico(); break;
+      case 'importar': await renderImportar(); break;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    await openDB();
+    document.getElementById('loading').classList.remove('show');
+
+    document.querySelectorAll('.sidebar .nav-link').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigate(link.dataset.page);
+      });
+    });
+
+    document.getElementById('btnLimparDados').addEventListener('click', async () => {
+      if (confirm('Deseja apagar todos os dados do sistema?')) {
+        for (const store of STORES) {
+          await clearStore(store);
+        }
+        alert('Dados limpos.');
+        navigate('dashboard');
+      }
+    });
+
+    navigate('dashboard');
+
+    document.addEventListener('click', (e) => {
+      if (e.target.matches('[data-bs-target="#modalProduto"]')) {
+        e.preventDefault();
+        abrirModalProduto();
+      }
+      if (e.target.matches('[data-bs-target="#modalFornecedor"]')) {
+        e.preventDefault();
+        abrirModalFornecedor();
+      }
+    });
+  });
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>
