@@ -70,6 +70,7 @@
         <h1 class="h2" id="pageTitle">Dashboard</h1>
         <div>
           <span class="badge bg-secondary me-2" id="statusDB">Offline</span>
+          <button class="btn btn-outline-secondary btn-sm me-2" id="btnPopularDadosTeste"><i class="bi bi-flask"></i> Popular Dados de Teste</button>
           <button class="btn btn-outline-secondary btn-sm" id="btnLimparDados"><i class="bi bi-trash"></i> Limpar Dados</button>
         </div>
       </div>
@@ -93,16 +94,17 @@
   </div>
 </div>
 
+<script src="sgc-core.js"></script>
 <script>
   // ============================================================
   // 1. CONFIGURAÇÃO E ESTADO GLOBAL
   // ============================================================
   const DB_NAME = 'SGC_DB';
-  const DB_VERSION = 1;
+  const DB_VERSION = 4;
   let db = null;
   let currentPage = 'dashboard';
 
-  const STORES = ['produtos', 'fornecedores', 'cotacoes', 'pedidos', 'historicos'];
+  const STORES = ['produtos', 'fornecedores', 'produto_fornecedor', 'historico_precos', 'cotacoes', 'itens_cotacao', 'pedidos', 'pedidos_compra', 'itens_pedido', 'historicos', 'historico_compras', 'importacoes', 'estoque'];
 
   // ============================================================
   // 2. INICIALIZAÇÃO DO INDEXEDDB
@@ -189,31 +191,230 @@
   // ============================================================
   // 4. LÓGICA DE NEGÓCIO
   // ============================================================
+  const sgcCore = window.SGC;
+  const PARAMETROS_SGC = (sgcCore && sgcCore.PARAMETROS_SGC) ? sgcCore.PARAMETROS_SGC : { dias_producao: 7, lead_time: 3, cobertura_minima: 10, limite_excesso: 20 };
+  window.PARAMETROS_SGC = PARAMETROS_SGC;
+
+  function toNumber(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function normalizeText(value) {
+    return String(value || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Z0-9\s]/g, '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, ' ');
+  }
+
+  async function registrarHistoricoPreco({ produto_id, fornecedor_id, data, preco_unitario, quantidade = 1, origem = 'manual' }) {
+    if (!produto_id || !fornecedor_id) {
+      return false;
+    }
+    const produto = await getById('produtos', produto_id);
+    const fornecedor = await getById('fornecedores', fornecedor_id);
+    if (!produto || !fornecedor) {
+      return false;
+    }
+    await add('historico_precos', {
+      produto_id: parseInt(produto_id),
+      fornecedor_id: parseInt(fornecedor_id),
+      data: data || new Date().toISOString().split('T')[0],
+      preco_unitario: toNumber(preco_unitario || 0),
+      quantidade: toNumber(quantidade || 1),
+      origem,
+    });
+    return true;
+  }
+
+  async function buscarMelhorFornecedor(produto_id) {
+    const produto = await getById('produtos', produto_id);
+    if (!produto) return null;
+
+    const relacoes = await getAll('produto_fornecedor');
+    const historicoPrecos = await getAll('historico_precos');
+    const fornecedores = await getAll('fornecedores');
+    const fornecedoresMap = {}; fornecedores.forEach(fornecedor => fornecedoresMap[fornecedor.id] = fornecedor);
+
+    const relacoesProduto = relacoes.filter(relacao => String(relacao.produto_id) === String(produto_id));
+    if (!relacoesProduto.length) {
+      const fornecedorBase = fornecedores.find(fornecedor => String(fornecedor.id) === String(produto.fornecedor_id));
+      return {
+        produto_id: produto.id,
+        fornecedor_id: fornecedorBase?.id || null,
+        fornecedor_nome: fornecedorBase?.nome || 'Não definido',
+        ultimo_preco: toNumber(produto.ultimo_preco || 0),
+        data_ultimo_preco: produto.data_ultima_compra || null,
+        prazo_entrega: fornecedorBase?.prazo_medio_entrega || fornecedorBase?.prazo_entrega || 3,
+        menor_preco_historico: toNumber(produto.ultimo_preco || 0),
+        quantidade_compras: 0,
+      };
+    }
+
+    const ranking = relacoesProduto.map(relacao => {
+      const historico = historicoPrecos.filter(item => String(item.produto_id) === String(produto_id) && String(item.fornecedor_id) === String(relacao.fornecedor_id));
+      const ultimoRegistro = historico.sort((a, b) => new Date(b.data || 0) - new Date(a.data || 0))[0];
+      const fornecedor = fornecedoresMap[relacao.fornecedor_id];
+      return {
+        produto_id: produto.id,
+        fornecedor_id: relacao.fornecedor_id,
+        fornecedor_nome: fornecedor?.nome || 'Não definido',
+        ultimo_preco: toNumber(relacao.ultimo_preco || ultimoRegistro?.preco_unitario || 0),
+        data_ultimo_preco: relacao.data_ultimo_preco || ultimoRegistro?.data || null,
+        prazo_entrega: toNumber(relacao.prazo_entrega || fornecedor?.prazo_medio_entrega || fornecedor?.prazo_entrega || 3),
+        menor_preco_historico: historico.length ? Math.min(...historico.map(item => toNumber(item.preco_unitario || 0)).filter(Boolean)) : toNumber(relacao.ultimo_preco || 0),
+        quantidade_compras: historico.length,
+      };
+    });
+
+    return ranking.sort((a, b) => {
+      if (a.ultimo_preco !== b.ultimo_preco) return a.ultimo_preco - b.ultimo_preco;
+      if (a.prazo_entrega !== b.prazo_entrega) return a.prazo_entrega - b.prazo_entrega;
+      return b.quantidade_compras - a.quantidade_compras;
+    })[0] || null;
+  }
+
+  function getNextInternalCode(existingProdutos = []) {
+    const numeros = existingProdutos
+      .map(produto => {
+        const match = String(produto.codigo_interno || produto.codigo || '').match(/-(\d+)$/);
+        return match ? parseInt(match[1], 10) : null;
+      })
+      .filter(value => Number.isInteger(value));
+    const next = numeros.length ? Math.max(...numeros) + 1 : 1;
+    return `PRODUTO-SEM-CODIGO-${String(next).padStart(4, '0')}`;
+  }
+
+  async function popularDadosTeste() {
+    const fornecedoresExistentes = await getAll('fornecedores');
+    if (!fornecedoresExistentes.length) {
+      const fornecedoresBase = [
+        { nome: 'Fornecedor A', cnpj: '11.111.111/0001-11', contato: 'Ana', telefone: '11999990001', email: 'ana@fornecedora.com', prazo_medio_entrega: 3, observacao: 'Fornecedor padrão', ativo: true },
+        { nome: 'Fornecedor B', cnpj: '22.222.222/0001-22', contato: 'Bruno', telefone: '11999990002', email: 'bruno@fornecedora.com', prazo_medio_entrega: 5, observacao: 'Preço competitivo', ativo: true },
+        { nome: 'Fornecedor C', cnpj: '33.333.333/0001-33', contato: 'Carla', telefone: '11999990003', email: 'carla@fornecedora.com', prazo_medio_entrega: 7, observacao: 'Entrega mais lenta', ativo: true },
+      ];
+      for (const fornecedor of fornecedoresBase) {
+        await add('fornecedores', fornecedor);
+      }
+    }
+
+    const produtosExistentes = await getAll('produtos');
+    if (!produtosExistentes.length) {
+      const produtosBase = [
+        { codigo: 'ARROZ01', descricao: 'Arroz 5kg', categoria: 'Alimentos', unidade: 'UN', estoque_atual: 20, consumo_medio_mensal: 180, ultimo_preco: 28.90, tipo_compra: 'Produção normal' },
+        { codigo: 'FEIJAO02', descricao: 'Feijão 1kg', categoria: 'Alimentos', unidade: 'UN', estoque_atual: 15, consumo_medio_mensal: 160, ultimo_preco: 7.20, tipo_compra: 'Produção normal' },
+        { codigo: 'OLEO03', descricao: 'Óleo de soja 900ml', categoria: 'Alimentos', unidade: 'UN', estoque_atual: 12, consumo_medio_mensal: 120, ultimo_preco: 8.50, tipo_compra: 'Produção normal' },
+        { codigo: 'CAFÉ04', descricao: 'Café torrado 500g', categoria: 'Bebidas', unidade: 'UN', estoque_atual: 8, consumo_medio_mensal: 90, ultimo_preco: 18.40, tipo_compra: 'Produção normal' },
+        { codigo: 'SAL05', descricao: 'Sal refinado 1kg', categoria: 'Alimentos', unidade: 'UN', estoque_atual: 10, consumo_medio_mensal: 70, ultimo_preco: 3.90, tipo_compra: 'Produção normal' },
+      ];
+      for (const produto of produtosBase) {
+        await add('produtos', produto);
+      }
+    }
+
+    const fornecedores = await getAll('fornecedores');
+    const produtos = await getAll('produtos');
+    const relacoesExistentes = await getAll('produto_fornecedor');
+    if (!relacoesExistentes.length) {
+      const relacoesBase = [
+        { produto_id: produtos[0]?.id, fornecedor_id: fornecedores[0]?.id, codigo_fornecedor: 'A100', ultimo_preco: 28.90, data_ultimo_preco: '2026-07-20', prazo_entrega: 3, quantidade_minima: 10, observacao: 'Melhor custo' },
+        { produto_id: produtos[0]?.id, fornecedor_id: fornecedores[1]?.id, codigo_fornecedor: 'B100', ultimo_preco: 28.50, data_ultimo_preco: '2026-07-22', prazo_entrega: 4, quantidade_minima: 12, observacao: 'Preço melhor' },
+        { produto_id: produtos[1]?.id, fornecedor_id: fornecedores[0]?.id, codigo_fornecedor: 'A200', ultimo_preco: 7.20, data_ultimo_preco: '2026-07-18', prazo_entrega: 3, quantidade_minima: 10, observacao: 'Boa disponibilidade' },
+        { produto_id: produtos[2]?.id, fornecedor_id: fornecedores[2]?.id, codigo_fornecedor: 'C300', ultimo_preco: 8.90, data_ultimo_preco: '2026-07-17', prazo_entrega: 7, quantidade_minima: 8, observacao: 'Mais caro' },
+        { produto_id: produtos[3]?.id, fornecedor_id: fornecedores[1]?.id, codigo_fornecedor: 'B400', ultimo_preco: 17.80, data_ultimo_preco: '2026-07-21', prazo_entrega: 5, quantidade_minima: 6, observacao: 'Bom preço' },
+        { produto_id: produtos[4]?.id, fornecedor_id: fornecedores[0]?.id, codigo_fornecedor: 'A500', ultimo_preco: 3.90, data_ultimo_preco: '2026-07-19', prazo_entrega: 3, quantidade_minima: 5, observacao: 'Custo baixo' },
+      ];
+      for (const relacao of relacoesBase) {
+        if (relacao.produto_id && relacao.fornecedor_id) {
+          await add('produto_fornecedor', relacao);
+        }
+      }
+    }
+
+    const historicoExistente = await getAll('historico_precos');
+    if (!historicoExistente.length) {
+      const produtosSeed = await getAll('produtos');
+      const fornecedoresSeed = await getAll('fornecedores');
+      const precosBase = [
+        { produto_id: produtosSeed[0]?.id, fornecedor_id: fornecedoresSeed[0]?.id, data: '2026-06-01', preco_unitario: 29.10, quantidade: 10, origem: 'cotação' },
+        { produto_id: produtosSeed[0]?.id, fornecedor_id: fornecedoresSeed[1]?.id, data: '2026-06-03', preco_unitario: 28.50, quantidade: 12, origem: 'cotação' },
+        { produto_id: produtosSeed[0]?.id, fornecedor_id: fornecedoresSeed[1]?.id, data: '2026-07-10', preco_unitario: 28.20, quantidade: 15, origem: 'compra manual' },
+        { produto_id: produtosSeed[1]?.id, fornecedor_id: fornecedoresSeed[0]?.id, data: '2026-06-15', preco_unitario: 7.50, quantidade: 10, origem: 'compra manual' },
+        { produto_id: produtosSeed[2]?.id, fornecedor_id: fornecedoresSeed[2]?.id, data: '2026-06-17', preco_unitario: 8.90, quantidade: 8, origem: 'cotação' },
+        { produto_id: produtosSeed[3]?.id, fornecedor_id: fornecedoresSeed[1]?.id, data: '2026-06-20', preco_unitario: 18.00, quantidade: 6, origem: 'compra manual' },
+        { produto_id: produtosSeed[4]?.id, fornecedor_id: fornecedoresSeed[0]?.id, data: '2026-06-22', preco_unitario: 4.10, quantidade: 5, origem: 'importação' },
+      ];
+      for (const item of precosBase) {
+        if (item.produto_id && item.fornecedor_id) {
+          await add('historico_precos', item);
+        }
+      }
+    }
+
+    await registrarEvento('dados de teste criados', 'teste', 'Dados de teste para fornecedores, produtos e histórico de preços foram carregados.');
+    alert('Dados de teste carregados com sucesso.');
+    renderDashboard();
+    renderProdutos();
+    renderNecessidade();
+    renderFornecedores();
+  }
+
+  function getParametrosSgc() {
+    return (sgcCore && sgcCore.PARAMETROS_SGC) ? sgcCore.PARAMETROS_SGC : window.PARAMETROS_SGC;
+  }
+
+  function atualizarParametrosSgc(novosParametros) {
+    const params = getParametrosSgc();
+    Object.assign(params, novosParametros);
+    if (sgcCore) sgcCore.PARAMETROS_SGC = params;
+    window.PARAMETROS_SGC = params;
+    return params;
+  }
+
   function calcularConsumoSemanal(consumoMensal) {
-    return parseFloat(((consumoMensal * 12) / 52).toFixed(2));
+    return sgcCore ? sgcCore.calcularConsumoSemanal(consumoMensal) : parseFloat((consumoMensal / 4.3333).toFixed(2));
   }
 
-  function calcularConsumoDiario(consumoSemanal) {
-    return parseFloat((consumoSemanal / 7).toFixed(2));
+  function calcularConsumoDiario(consumoMensal) {
+    return sgcCore ? sgcCore.calcularConsumoDiario(consumoMensal) : parseFloat((consumoMensal / 30).toFixed(2));
   }
 
-  function calcularEstoqueMinimo(consumoDiario, prazoEntrega = 3, margemSeguranca = 0.2) {
-    return Math.ceil(consumoDiario * prazoEntrega * (1 + margemSeguranca));
+  function calcularEstoqueMinimo(consumoDiario, prazoEntrega = getParametrosSgc().lead_time, margemSeguranca = 0.2) {
+    return sgcCore ? sgcCore.calcularEstoqueSeguranca(consumoDiario, prazoEntrega, margemSeguranca) : Math.ceil(consumoDiario * prazoEntrega * (1 + margemSeguranca));
   }
 
   function calcularDiasEstoque(estoqueAtual, consumoDiario) {
-    if (consumoDiario === 0) return Infinity;
-    return parseFloat((estoqueAtual / consumoDiario).toFixed(1));
+    return sgcCore ? sgcCore.calcularCoberturaDias(estoqueAtual, consumoDiario) : (consumoDiario === 0 ? Infinity : parseFloat((estoqueAtual / consumoDiario).toFixed(1)));
   }
 
-  function calcularStatus(dias) {
-    if (dias > 7) return 'VERDE';
-    if (dias >= 4) return 'AMARELO';
-    return 'VERMELHO';
+  function calcularStatus(produtoOuCobertura) {
+    return sgcCore ? sgcCore.calcularStatusCompra(produtoOuCobertura) : (typeof produtoOuCobertura === 'object' ? 'NORMAL' : (produtoOuCobertura > 20 ? 'EXCESSO' : produtoOuCobertura > 10 ? 'NORMAL' : produtoOuCobertura >= 3 ? 'ATENÇÃO' : 'URGENTE'));
   }
 
-  function quantidadeSugerida(consumoSemanal, estoqueMinimo, estoqueAtual) {
-    return Math.max(0, consumoSemanal + estoqueMinimo - estoqueAtual);
+  function quantidadeSugerida(consumoDiario, estoqueAtual, recebendo = 0) {
+    return sgcCore ? sgcCore.calcularQuantidadeSugerida(consumoDiario, estoqueAtual, recebendo) : Math.max(0, Math.ceil((consumoDiario * 10) - estoqueAtual - recebendo));
+  }
+
+  async function registrarEvento(tipoEvento, referencia, descricao, usuario = 'Sistema') {
+    await add('historico_compras', {
+      tipo_evento: tipoEvento,
+      data: new Date().toISOString(),
+      usuario,
+      referencia,
+      descricao,
+    });
+  }
+
+  function calcularStatusPedido(itensPedido = []) {
+    if (!itensPedido.length) return 'PENDENTE';
+    const totalSolicitado = itensPedido.reduce((sum, item) => sum + toNumber(item.quantidade), 0);
+    const totalRecebido = itensPedido.reduce((sum, item) => sum + toNumber(item.recebido), 0);
+    if (totalRecebido >= totalSolicitado) return 'RECEBIDO';
+    if (totalRecebido > 0) return 'PARCIALMENTE_RECEBIDO';
+    return 'PENDENTE';
   }
 
   // ============================================================
@@ -223,180 +424,403 @@
     const workbook = XLSX.read(arrayBuffer, { type: 'array' });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
-
-    const produtos = [];
-    let i = 0;
-    while (i < data.length) {
-      const row = data[i];
-      // Procura linha que contenha "Código(s):" (com ou sem parênteses e dois pontos)
-      if (row.length > 0 && typeof row[0] === 'string' && /código\(s\)\s*:/i.test(row[0])) {
-        // Descrição: linha anterior (não vazia)
-        let descricao = '';
-        let j = i - 1;
-        while (j >= 0 && data[j].length > 0 && data[j][0].trim() === '') j--;
-        if (j >= 0 && data[j].length > 0) {
-          descricao = data[j][0].trim();
-        }
-
-        // Extrai código
-        const codigoMatch = row[0].match(/código\(s\)\s*:\s*(.*)/i);
-        const codigo = codigoMatch ? codigoMatch[1].trim() : '';
-
-        // Avança até o cabeçalho "Pedido"
-        while (i < data.length && data[i].length > 0 && data[i][0] !== 'Pedido') i++;
-        if (i >= data.length) break;
-        i++; // pula o cabeçalho
-
-        // Lê pedidos (ignoramos, mas pulamos até a linha de resumo)
-        while (i < data.length && data[i].length > 0 && data[i][0] !== '' && !/em compras|disponivel|média mês|saldo/i.test(data[i].join(' '))) {
-          i++;
-        }
-
-        // Procura linha de resumo
-        let resumo = { disponivel: 0, mediaMes: 0 };
-        // Se a linha atual já tem "DISPONIVEL" ou "MÉDIA MÊS", usa ela
-        if (i < data.length) {
-          const r = data[i];
-          // Tenta identificar "DISPONIVEL" e "MÉDIA MÊS" na linha
-          let foundDisponivel = false, foundMedia = false;
-          for (let k = 0; k < r.length; k++) {
-            if (typeof r[k] === 'string' && /disponivel/i.test(r[k])) {
-              const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
-              if (val > 0) { resumo.disponivel = val; foundDisponivel = true; }
-            }
-            if (typeof r[k] === 'string' && /média mês|media/i.test(r[k])) {
-              const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
-              if (val > 0) { resumo.mediaMes = val; foundMedia = true; }
-            }
-          }
-          // Se não encontrou, tenta posições fixas (comuns no relatório)
-          if (!foundDisponivel && r[17] !== undefined) resumo.disponivel = parseFloat(r[17]) || 0;
-          if (!foundMedia && r[25] !== undefined) resumo.mediaMes = parseFloat(r[25]) || 0;
-          // Último recurso: procurar "SALDO" no final
-          if (resumo.disponivel === 0) {
-            for (let k = 0; k < r.length; k++) {
-              if (typeof r[k] === 'string' && /saldo/i.test(r[k])) {
-                const val = parseFloat(r[k+1]) || parseFloat(r[k+2]) || 0;
-                if (val > 0) { resumo.disponivel = val; break; }
-              }
-            }
-          }
-        }
-
-        if (descricao) {
-          produtos.push({
-            codigo: codigo,
-            descricao: descricao,
-            estoque_atual: resumo.disponivel || 0,
-            consumo_medio_mensal: resumo.mediaMes || 0,
-            categoria: '',
-            unidade: '',
-            fornecedor_id: null,
-            ultimo_preco: 0,
-            data_ultima_compra: null,
-          });
-        }
-      }
-      i++;
-    }
+    const produtos = sgcCore ? sgcCore.parsePlanilhaRows(data) : [];
     return produtos;
   }
 
   // ============================================================
   // 6. RENDERIZAÇÃO DAS PÁGINAS
   // ============================================================
+  let dashboardFilters = { status: 'todos', fornecedor: 'todos', categoria: 'todos' };
+
+  function getResumoDashboardProduto(produto, fornecedorMap = {}, historicos = [], pedidos = [], itensPedido = [], cotacoes = [], itensCotacao = []) {
+    const consumoDiario = calcularConsumoDiario(produto.consumo_medio_mensal || 0);
+    const estoqueAtual = toNumber(produto.estoque_atual || 0);
+    const recebendo = toNumber(produto.recebendo || 0);
+    const coberturaDias = calcularDiasEstoque(estoqueAtual, consumoDiario);
+    const status = calcularStatus({ consumo_medio_mensal: produto.consumo_medio_mensal || 0, estoque_atual: estoqueAtual });
+
+    const historicoProduto = historicos.filter(h => String(h.produto_id) === String(produto.id)).sort((a, b) => new Date(b.data || 0) - new Date(a.data || 0));
+    const ultimoPreco = toNumber(historicoProduto[0]?.preco_unitario || produto.ultimo_preco || 0);
+
+    let fornecedorPrincipal = produto.fornecedor_id || null;
+    if (!fornecedorPrincipal) {
+      const ultimoHistorico = historicoProduto[0];
+      if (ultimoHistorico?.fornecedor_id) fornecedorPrincipal = ultimoHistorico.fornecedor_id;
+      else {
+        const itemCotacao = itensCotacao.filter(item => String(item.produto_id) === String(produto.id)).sort((a, b) => (b.id || 0) - (a.id || 0))[0];
+        if (itemCotacao) {
+          const cotacao = cotacoes.find(c => c.id === itemCotacao.cotacao_id);
+          fornecedorPrincipal = cotacao?.fornecedor_id || null;
+        }
+      }
+    }
+
+    const necessidade10Dias = consumoDiario * 10;
+    const quantidadeSugerida = Math.max(0, Math.ceil(necessidade10Dias - estoqueAtual - recebendo));
+
+    return {
+      produto,
+      consumoDiario,
+      estoqueAtual,
+      recebendo,
+      coberturaDias,
+      status,
+      fornecedorPrincipal,
+      fornecedorNome: fornecedorPrincipal ? (fornecedorMap[fornecedorPrincipal] || 'Não definido') : 'Não definido',
+      ultimoPreco,
+      necessidade10Dias,
+      quantidadeSugerida,
+      valorEstimado: ultimoPreco * quantidadeSugerida,
+    };
+  }
+
   async function renderDashboard() {
     const produtos = await getAll('produtos');
-    const pedidos = await getAll('pedidos');
-    const historicos = await getAll('historicos');
+    const pedidos = await getAll('pedidos_compra');
+    const itensPedido = await getAll('itens_pedido');
     const fornecedores = await getAll('fornecedores');
+    const cotacoes = await getAll('cotacoes');
+    const itensCotacao = await getAll('itens_cotacao');
+    const historicoCompras = await getAll('historico_compras');
+    const historicos = historicoCompras.length ? historicoCompras : await getAll('historicos');
 
-    const totalCompradoMes = historicos.filter(h => {
-      const d = new Date(h.data);
+    const fornecedorMap = {};
+    fornecedores.forEach(f => fornecedorMap[f.id] = f.nome);
+
+    const produtosComResumo = await Promise.all(produtos.map(async produto => {
+      const resumo = getResumoDashboardProduto(produto, fornecedorMap, historicos, pedidos, itensPedido, cotacoes, itensCotacao);
+      const recomendacao = await buscarMelhorFornecedor(produto.id);
+      const menorPrecoHistorico = recomendacao?.menor_preco_historico || resumo.ultimoPreco || 0;
+      const economiaPossivel = Math.max(0, (resumo.quantidadeSugerida * menorPrecoHistorico) - (resumo.quantidadeSugerida * resumo.ultimoPreco));
+      return {
+        ...resumo,
+        recomendacao,
+        menorPrecoHistorico,
+        economiaPossivel,
+      };
+    }));
+
+    const produtosFiltrados = produtosComResumo.filter(item => {
+      const statusOk = dashboardFilters.status === 'todos' || item.status === dashboardFilters.status;
+      const fornecedorOk = dashboardFilters.fornecedor === 'todos' || String(item.fornecedorPrincipal) === String(dashboardFilters.fornecedor);
+      const categoriaOk = dashboardFilters.categoria === 'todos' || String(item.produto.categoria || '').toLowerCase() === dashboardFilters.categoria.toLowerCase();
+      return statusOk && fornecedorOk && categoriaOk;
+    }).sort((a, b) => {
+      const ordemStatus = { URGENTE: 0, ATENÇÃO: 1, NORMAL: 2, EXCESSO: 3, 'SEM HISTÓRICO': 4, MONITORAR: 5 };
+      const statusA = ordemStatus[a.status] ?? 99;
+      const statusB = ordemStatus[b.status] ?? 99;
+      if (statusA !== statusB) return statusA - statusB;
+      return a.produto.descricao.localeCompare(b.produto.descricao);
+    });
+
+    const criticos = produtosComResumo.filter(item => item.status === 'URGENTE');
+    const emAtencao = produtosComResumo.filter(item => item.status === 'ATENÇÃO');
+    const semHistorico = produtosComResumo.filter(item => item.status === 'SEM HISTÓRICO');
+    const emExcesso = produtosComResumo.filter(item => item.status === 'EXCESSO');
+
+    const pedidosAbertos = pedidos.filter(pedido => pedido.status !== 'RECEBIDO');
+    const pedidosAtrasados = pedidosAbertos.filter(pedido => {
+      const fornecedor = fornecedores.find(f => f.id === pedido.fornecedor_id);
+      const prazo = toNumber(fornecedor?.prazo_entrega || 3);
+      const dataPedido = new Date(pedido.data || 0);
+      const diff = (new Date() - dataPedido) / (1000 * 60 * 60 * 24);
+      return diff > prazo;
+    });
+
+    const valorPendente = pedidosAbertos.reduce((sum, pedido) => {
+      const itens = itensPedido.filter(item => item.pedido_id === pedido.id);
+      const valor = itens.reduce((total, item) => total + (toNumber(item.valor_unitario) * toNumber(item.quantidade - item.recebido || 0)), 0);
+      return sum + valor;
+    }, 0);
+
+    const itensAguardandoEntrega = itensPedido.filter(item => toNumber(item.quantidade) - toNumber(item.recebido) > 0).length;
+
+    const valorCompradoPeriodo = historicos.filter(h => {
+      const d = new Date(h.data || 0);
       const now = new Date();
       return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-    }).reduce((sum, h) => sum + h.total, 0);
+    }).reduce((sum, h) => sum + toNumber(h.total || (h.preco_unitario * h.quantidade) || 0), 0);
 
-    const criticos = produtos.filter(p => {
-      const dias = calcularDiasEstoque(p.estoque_atual, calcularConsumoDiario(calcularConsumoSemanal(p.consumo_medio_mensal)));
-      return dias < 3;
+    const coberturaMedia = produtosComResumo.length
+      ? (produtosComResumo.reduce((sum, item) => sum + (item.coberturaDias === Infinity ? 0 : item.coberturaDias), 0) / produtosComResumo.length).toFixed(1)
+      : '0.0';
+
+    const abaixoLeadTime = produtosComResumo.filter(item => item.coberturaDias !== Infinity && item.coberturaDias < toNumber(getParametrosSgc().lead_time || 3)).length;
+    const semConsumo = produtosComResumo.filter(item => toNumber(item.produto.consumo_medio_mensal || 0) === 0).length;
+    const parados = produtosComResumo.filter(item => toNumber(item.produto.consumo_medio_mensal || 0) === 0 && toNumber(item.produto.estoque_atual || 0) === 0).length;
+    const maiorConsumo = produtosComResumo.slice().sort((a, b) => toNumber(b.produto.consumo_medio_mensal || 0) - toNumber(a.produto.consumo_medio_mensal || 0))[0];
+
+    const topConsumo = produtosComResumo.slice().sort((a, b) => toNumber(b.produto.consumo_medio_mensal || 0) - toNumber(a.produto.consumo_medio_mensal || 0)).slice(0, 10);
+    const topRisco = produtosComResumo.slice().sort((a, b) => {
+      const riscoA = a.coberturaDias === Infinity ? 9999 : a.coberturaDias;
+      const riscoB = b.coberturaDias === Infinity ? 9999 : b.coberturaDias;
+      if (riscoA !== riscoB) return riscoA - riscoB;
+      return (a.status === 'URGENTE' ? -1 : 1) - (b.status === 'URGENTE' ? -1 : 1);
+    }).slice(0, 10);
+
+    const comprasPorPeriodo = Object.values(historicos.reduce((acc, item) => {
+      const data = new Date(item.data || 0);
+      const chave = `${data.getFullYear()}-${String(data.getMonth() + 1).padStart(2, '0')}`;
+      if (!acc[chave]) acc[chave] = { periodo: chave, total: 0, qtd: 0 };
+      acc[chave].total += toNumber(item.total || (item.preco_unitario * item.quantidade) || 0);
+      acc[chave].qtd += toNumber(item.quantidade || 0);
+      return acc;
+    }, {})).sort((a, b) => a.periodo.localeCompare(b.periodo));
+
+    const produtosMaisComprados = Object.values(historicos.reduce((acc, item) => {
+      const key = String(item.produto_id);
+      if (!acc[key]) acc[key] = { produto_id: item.produto_id, quantidade: 0, total: 0 };
+      acc[key].quantidade += toNumber(item.quantidade || 0);
+      acc[key].total += toNumber(item.total || (item.preco_unitario * item.quantidade) || 0);
+      return acc;
+    }, {})).sort((a, b) => b.quantidade - a.quantidade).slice(0, 10);
+
+    const variacaoPreco = produtosComResumo.filter(item => item.ultimoPreco > 0).map(item => {
+      const registros = historicos.filter(h => String(h.produto_id) === String(item.produto.id));
+      if (registros.length < 2) return null;
+      const precios = registros.map(h => toNumber(h.preco_unitario || 0)).filter(Boolean);
+      const primeiro = precios[0];
+      const ultimo = precios[precios.length - 1];
+      return {
+        produto: item.produto,
+        primeiro,
+        ultimo,
+        variacao: primeiro ? (((ultimo - primeiro) / primeiro) * 100) : 0,
+      };
+    }).filter(Boolean).sort((a, b) => b.variacao - a.variacao).slice(0, 10);
+
+    const categorias = [...new Set(produtos.map(p => p.categoria || '').filter(Boolean))];
+    const fornecedoresDashboard = fornecedores.map(fornecedor => {
+      const comprasFornecedor = historicos.filter(h => String(h.fornecedor_id) === String(fornecedor.id));
+      const pedidosFornecedor = pedidos.filter(pedido => String(pedido.fornecedor_id) === String(fornecedor.id));
+      const atrasos = pedidosFornecedor.filter(pedido => pedido.status !== 'RECEBIDO' && ((new Date() - new Date(pedido.data || 0)) / (1000 * 60 * 60 * 24)) > toNumber(fornecedor.prazo_entrega || 3)).length;
+      return {
+        fornecedor,
+        quantidadeCompras: comprasFornecedor.length,
+        valorComprado: comprasFornecedor.reduce((sum, h) => sum + toNumber(h.total || (h.preco_unitario * h.quantidade) || 0), 0),
+        ultimoPreco: toNumber(comprasFornecedor[0]?.preco_unitario || fornecedor.ultimo_preco || 0),
+        prazoEntrega: toNumber(fornecedor.prazo_entrega || 3),
+        atrasos,
+      };
     });
 
-    const abaixoMinimo = produtos.filter(p => {
-      const consDiario = calcularConsumoDiario(calcularConsumoSemanal(p.consumo_medio_mensal));
-      const min = calcularEstoqueMinimo(consDiario);
-      return p.estoque_atual < min;
-    });
+    const cards = [
+      { title: 'Total de produtos cadastrados', value: produtos.length, detail: 'Base atual do cadastro' },
+      { title: 'Produtos críticos', value: criticos.length, detail: 'Status URGENTE' },
+      { title: 'Produtos em atenção', value: emAtencao.length, detail: 'Status ATENÇÃO' },
+      { title: 'Produtos sem histórico', value: semHistorico.length, detail: 'Sem dados de compra' },
+      { title: 'Produtos em excesso', value: emExcesso.length, detail: 'Cobertura acima do limite' },
+      { title: 'Compras pendentes', value: pedidosAbertos.length, detail: 'Pedidos abertos' },
+      { title: 'Pedidos em atraso', value: pedidosAtrasados.length, detail: 'Acima do prazo' },
+      { title: 'Valor total comprado no período', value: `R$ ${valorCompradoPeriodo.toFixed(2)}`, detail: 'Mês atual' },
+    ];
 
-    const ultimas = historicos.sort((a,b) => new Date(b.data) - new Date(a.data)).slice(0,5);
-
-    const html = `
+    let html = `
       <div class="row g-3 mb-4">
-        <div class="col-md-3">
-          <div class="card p-3">
-            <h6 class="text-muted">Total Comprado no Mês</h6>
-            <h3>R$ ${totalCompradoMes.toFixed(2)}</h3>
+        ${cards.map(card => `
+          <div class="col-xl-3 col-md-6">
+            <div class="card p-3 h-100">
+              <div class="text-muted small">${card.title}</div>
+              <h3 class="mt-2 mb-0">${card.value}</h3>
+              <div class="text-muted small mt-2">${card.detail}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="card p-3 mb-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <div>
+            <h5 class="mb-1">Necessidade de Compra</h5>
+            <p class="text-muted mb-0">Tabela operacional para decisão diária de compra.</p>
+          </div>
+          <div class="d-flex gap-2 flex-wrap">
+            <select class="form-select form-select-sm" id="filtroStatusDashboard" style="width:auto;">
+              <option value="todos">Todos os status</option>
+              <option value="URGENTE">URGENTE</option>
+              <option value="ATENÇÃO">ATENÇÃO</option>
+              <option value="NORMAL">NORMAL</option>
+              <option value="EXCESSO">EXCESSO</option>
+              <option value="SEM HISTÓRICO">SEM HISTÓRICO</option>
+              <option value="MONITORAR">MONITORAR</option>
+            </select>
+            <select class="form-select form-select-sm" id="filtroFornecedorDashboard" style="width:auto;">
+              <option value="todos">Todos os fornecedores</option>
+              ${fornecedores.map(f => `<option value="${f.id}">${f.nome}</option>`).join('')}
+            </select>
+            <select class="form-select form-select-sm" id="filtroCategoriaDashboard" style="width:auto;">
+              <option value="todos">Todas as categorias</option>
+              ${categorias.map(c => `<option value="${c}">${c}</option>`).join('')}
+            </select>
           </div>
         </div>
-        <div class="col-md-3">
-          <div class="card p-3">
-            <h6 class="text-muted">Produtos Críticos</h6>
-            <h3>${criticos.length}</h3>
-          </div>
-        </div>
-        <div class="col-md-3">
-          <div class="card p-3">
-            <h6 class="text-muted">Abaixo do Estoque Mínimo</h6>
-            <h3>${abaixoMinimo.length}</h3>
-          </div>
-        </div>
-        <div class="col-md-3">
-          <div class="card p-3">
-            <h6 class="text-muted">Fornecedores</h6>
-            <h3>${fornecedores.length}</h3>
-          </div>
+        <div class="table-responsive mt-3">
+          <table class="table table-bordered table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Prioridade</th>
+                <th>Código</th>
+                <th>Produto</th>
+                <th>Estoque Atual</th>
+                <th>Consumo Diário</th>
+                <th>Cobertura (dias)</th>
+                <th>Necessidade 10 dias</th>
+                <th>Quantidade Sugerida</th>
+                <th>Fornecedor Recomendado</th>
+                <th>Último Preço</th>
+                <th>Valor Atual Estimado</th>
+                <th>Economia Possível</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${produtosFiltrados.map(item => `
+                <tr>
+                  <td><span class="badge-status ${sgcCore ? sgcCore.calcularStatusBadge(item.status) : ''}">${item.status}</span></td>
+                  <td>${item.produto.codigo || item.produto.codigo_interno || ''}</td>
+                  <td>${item.produto.descricao}</td>
+                  <td>${item.estoqueAtual}</td>
+                  <td>${item.consumoDiario.toFixed(2)}</td>
+                  <td>${item.coberturaDias === Infinity ? '∞' : item.coberturaDias.toFixed(1)}</td>
+                  <td>${item.necessidade10Dias.toFixed(2)}</td>
+                  <td>${item.quantidadeSugerida}</td>
+                  <td>${item.recomendacao?.fornecedor_nome || item.fornecedorNome}</td>
+                  <td>R$ ${item.ultimoPreco.toFixed(2)}</td>
+                  <td>R$ ${item.valorEstimado.toFixed(2)}</td>
+                  <td>${item.economiaPossivel > 0 ? `R$ ${item.economiaPossivel.toFixed(2)}` : 'R$ 0.00'}</td>
+                </tr>
+              `).join('')}
+              ${produtosFiltrados.length === 0 ? '<tr><td colspan="12" class="text-center text-muted">Nenhum produto encontrado para estes filtros.</td></tr>' : ''}
+            </tbody>
+          </table>
         </div>
       </div>
-      <div class="row">
-        <div class="col-md-6">
-          <div class="card">
-            <div class="card-header">Últimas Compras</div>
-            <div class="card-body">
-              <table class="table table-sm">
-                <thead><tr><th>Data</th><th>Produto</th><th>Total</th></tr></thead>
-                <tbody>
-                  ${ultimas.map(h => `
-                    <tr>
-                      <td>${h.data}</td>
-                      <td>${h.produto_id}</td>
-                      <td>R$ ${h.total.toFixed(2)}</td>
-                    </tr>
-                  `).join('')}
-                  ${ultimas.length === 0 ? '<tr><td colspan="3" class="text-center">Nenhuma compra registrada</td></tr>' : ''}
-                </tbody>
-              </table>
+
+      <div class="row g-4 mb-4">
+        <div class="col-lg-6">
+          <div class="card p-3 h-100">
+            <h5 class="mb-3">Análise de Estoque</h5>
+            <div class="row g-3">
+              <div class="col-md-6"><div class="border rounded p-3"><div class="text-muted small">Cobertura média</div><h4>${coberturaMedia}</h4><div class="text-muted small">dias</div></div></div>
+              <div class="col-md-6"><div class="border rounded p-3"><div class="text-muted small">Produtos abaixo do lead time</div><h4>${abaixoLeadTime}</h4><div class="text-muted small">itens</div></div></div>
+              <div class="col-md-6"><div class="border rounded p-3"><div class="text-muted small">Produtos sem consumo</div><h4>${semConsumo}</h4><div class="text-muted small">itens</div></div></div>
+              <div class="col-md-6"><div class="border rounded p-3"><div class="text-muted small">Produtos parados</div><h4>${parados}</h4><div class="text-muted small">itens</div></div></div>
+            </div>
+            <div class="mt-3">
+              <div class="text-muted small">Maior consumo</div>
+              <div class="fw-semibold">${maiorConsumo ? `${maiorConsumo.produto.descricao} (${toNumber(maiorConsumo.produto.consumo_medio_mensal || 0)} un/mês)` : 'Sem dados'}</div>
             </div>
           </div>
         </div>
-        <div class="col-md-6">
-          <div class="card">
-            <div class="card-header">Produtos com Estoque Crítico</div>
-            <div class="card-body">
-              <ul class="list-group">
-                ${criticos.slice(0,5).map(p => `
-                  <li class="list-group-item d-flex justify-content-between align-items-center">
-                    ${p.descricao}
-                    <span class="badge bg-danger">${p.estoque_atual} un</span>
-                  </li>
-                `).join('')}
-                ${criticos.length === 0 ? '<li class="list-group-item text-center">Nenhum produto crítico</li>' : ''}
+        <div class="col-lg-6">
+          <div class="card p-3 h-100">
+            <h5 class="mb-3">Ranking de Estoque</h5>
+            <div class="mb-3">
+              <div class="fw-semibold small text-uppercase text-muted">Top 10 maior consumo mensal</div>
+              <ul class="list-group list-group-flush mt-2">
+                ${topConsumo.map(item => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${item.produto.descricao}</span><span>${toNumber(item.produto.consumo_medio_mensal || 0)}</span></li>`).join('')}
+              </ul>
+            </div>
+            <div>
+              <div class="fw-semibold small text-uppercase text-muted">Top 10 maior risco de ruptura</div>
+              <ul class="list-group list-group-flush mt-2">
+                ${topRisco.map(item => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${item.produto.descricao}</span><span>${item.coberturaDias === Infinity ? '∞' : item.coberturaDias.toFixed(1)} dias</span></li>`).join('')}
               </ul>
             </div>
           </div>
         </div>
       </div>
+
+      <div class="row g-4 mb-4">
+        <div class="col-lg-7">
+          <div class="card p-3 h-100">
+            <h5 class="mb-3">Compras</h5>
+            <div class="row g-3 mb-3">
+              <div class="col-md-4"><div class="border rounded p-3"><div class="text-muted small">Pedidos abertos</div><h4>${pedidosAbertos.length}</h4></div></div>
+              <div class="col-md-4"><div class="border rounded p-3"><div class="text-muted small">Valor pendente</div><h4>R$ ${valorPendente.toFixed(2)}</h4></div></div>
+              <div class="col-md-4"><div class="border rounded p-3"><div class="text-muted small">Itens aguardando entrega</div><h4>${itensAguardandoEntrega}</h4></div></div>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm table-bordered align-middle">
+                <thead><tr><th>Número</th><th>Fornecedor</th><th>Data</th><th>Valor</th><th>Status</th></tr></thead>
+                <tbody>
+                  ${pedidosAbertos.map(pedido => `
+                    <tr>
+                      <td>#${pedido.id}</td>
+                      <td>${fornecedorMap[pedido.fornecedor_id] || pedido.fornecedor_id}</td>
+                      <td>${pedido.data}</td>
+                      <td>R$ ${toNumber(pedido.valor_total || 0).toFixed(2)}</td>
+                      <td>${pedido.status}</td>
+                    </tr>
+                  `).join('')}
+                  ${pedidosAbertos.length === 0 ? '<tr><td colspan="5" class="text-center text-muted">Nenhum pedido aberto.</td></tr>' : ''}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-5">
+          <div class="card p-3 h-100">
+            <h5 class="mb-3">Fornecedores</h5>
+            <div class="table-responsive">
+              <table class="table table-sm table-bordered align-middle">
+                <thead><tr><th>Fornecedor</th><th>Compras</th><th>Valor</th><th>Prazo</th><th>Atrasos</th></tr></thead>
+                <tbody>
+                  ${fornecedoresDashboard.map(item => `
+                    <tr>
+                      <td>${item.fornecedor.nome}</td>
+                      <td>${item.quantidadeCompras}</td>
+                      <td>R$ ${item.valorComprado.toFixed(2)}</td>
+                      <td>${item.prazoEntrega} dias</td>
+                      <td>${item.atrasos}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card p-3">
+        <h5 class="mb-3">Histórico</h5>
+        <div class="row g-4">
+          <div class="col-lg-4">
+            <div class="fw-semibold small text-uppercase text-muted">Compras por período</div>
+            <ul class="list-group list-group-flush mt-2">
+              ${comprasPorPeriodo.map(item => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${item.periodo}</span><span>R$ ${item.total.toFixed(2)}</span></li>`).join('')}
+            </ul>
+          </div>
+          <div class="col-lg-4">
+            <div class="fw-semibold small text-uppercase text-muted">Produtos mais comprados</div>
+            <ul class="list-group list-group-flush mt-2">
+              ${produtosMaisComprados.map(item => `<li class="list-group-item px-0 d-flex justify-content-between"><span>${item.produto_id}</span><span>${item.quantidade}</span></li>`).join('')}
+            </ul>
+          </div>
+          <div class="col-lg-4">
+            <div class="fw-semibold small text-uppercase text-muted">Variação de preço</div>
+            <ul class="list-group list-group-flush mt-2">
+              ${variacaoPreco.map(item => `<li class="list-group-item px-0"><div class="d-flex justify-content-between"><span>${item.produto.descricao}</span><span>${item.variacao.toFixed(1)}%</span></div><small class="text-muted">R$ ${item.primeiro.toFixed(2)} → R$ ${item.ultimo.toFixed(2)}</small></li>`).join('')}
+            </ul>
+          </div>
+        </div>
+      </div>
     `;
+
     document.getElementById('page-dashboard').innerHTML = html;
+
+    document.getElementById('filtroStatusDashboard')?.addEventListener('change', (e) => {
+      dashboardFilters.status = e.target.value;
+      renderDashboard();
+    });
+    document.getElementById('filtroFornecedorDashboard')?.addEventListener('change', (e) => {
+      dashboardFilters.fornecedor = e.target.value;
+      renderDashboard();
+    });
+    document.getElementById('filtroCategoriaDashboard')?.addEventListener('change', (e) => {
+      dashboardFilters.categoria = e.target.value;
+      renderDashboard();
+    });
   }
 
   async function renderProdutos() {
@@ -413,25 +837,26 @@
       <div class="table-responsive">
         <table class="table table-bordered table-hover">
           <thead>
-            <tr><th>Código</th><th>Descrição</th><th>Estoque</th><th>Consumo Semanal</th><th>Dias Estoque</th><th>Status</th><th>Fornecedor</th><th>Ações</th></tr>
+            <tr><th>Código</th><th>Descrição</th><th>Estoque</th><th>Consumo Semanal</th><th>Dias Estoque</th><th>Status</th><th>Tipo Compra</th><th>Fornecedor</th><th>Ações</th></tr>
           </thead>
           <tbody>
     `;
     produtos.forEach(p => {
-      const consSem = calcularConsumoSemanal(p.consumo_medio_mensal);
-      const consDiario = calcularConsumoDiario(consSem);
+      const consDiario = calcularConsumoDiario(p.consumo_medio_mensal || 0);
       const dias = calcularDiasEstoque(p.estoque_atual, consDiario);
-      const status = calcularStatus(dias);
-      const badge = `badge-status badge-${status.toLowerCase()}`;
+      const status = calcularStatus({ consumo_medio_mensal: p.consumo_medio_mensal || 0, estoque_atual: p.estoque_atual || 0 });
+      const badge = `badge-status ${sgcCore ? sgcCore.calcularStatusBadge(status) : (status === 'URGENTE' ? 'badge-vermelho' : status === 'ATENÇÃO' ? 'badge-amarelo' : status === 'EXCESSO' ? 'badge bg-primary' : status === 'MONITORAR' || status === 'SEM HISTÓRICO' ? 'badge bg-secondary' : 'badge-verde')}`;
       const fornecedorNome = p.fornecedor_id ? fornecedorMap[p.fornecedor_id] || 'Não definido' : 'Não definido';
+      const tipoCompra = p.tipo_compra || 'Produção normal';
       html += `
         <tr>
           <td>${p.codigo || ''}</td>
           <td>${p.descricao}</td>
           <td>${p.estoque_atual}</td>
-          <td>${consSem.toFixed(2)}</td>
+          <td>${consDiario.toFixed(2)}</td>
           <td>${dias === Infinity ? '∞' : dias.toFixed(1)}</td>
           <td><span class="${badge}">${status}</span></td>
+          <td>${tipoCompra}</td>
           <td>${fornecedorNome}</td>
           <td>
             <button class="btn btn-sm btn-outline-primary editar-produto" data-id="${p.id}"><i class="bi bi-pencil"></i></button>
@@ -465,67 +890,118 @@
     const fornecedores = await getAll('fornecedores');
     const fornecedorMap = {};
     fornecedores.forEach(f => fornecedorMap[f.id] = f.nome);
+    const parametros = getParametrosSgc();
 
     let html = `
       <h4>Necessidade de Compra</h4>
-      <p class="text-muted">Sugestão de compra para suprir 1 semana + estoque mínimo</p>
+      <p class="text-muted">Sugestão de compra considerando ${parametros.dias_producao} dias de produção + ${parametros.lead_time} dias de lead time.</p>
+      <div class="card p-3 mb-3">
+        <div class="row g-2 align-items-end">
+          <div class="col-md-2">
+            <label class="form-label small">Dias produção</label>
+            <input type="number" class="form-control form-control-sm" id="paramDiasProducao" value="${parametros.dias_producao}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Lead time</label>
+            <input type="number" class="form-control form-control-sm" id="paramLeadTime" value="${parametros.lead_time}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Cobertura mínima</label>
+            <input type="number" class="form-control form-control-sm" id="paramCoberturaMinima" value="${parametros.cobertura_minima}">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Limite excesso</label>
+            <input type="number" class="form-control form-control-sm" id="paramLimiteExcesso" value="${parametros.limite_excesso}">
+          </div>
+          <div class="col-md-4 d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" id="btnSalvarParametros">Salvar Parâmetros</button>
+            <button class="btn btn-success btn-sm" id="btnGerarCotacaoSelecionada">Gerar Cotação</button>
+          </div>
+        </div>
+      </div>
       <div class="table-responsive">
         <table class="table table-bordered">
           <thead>
-            <tr><th>Produto</th><th>Estoque Atual</th><th>Consumo Semanal</th><th>Dias Estoque</th><th>Estoque Mínimo</th><th>Qtd. Sugerida</th><th>Fornecedor</th><th>Ação</th></tr>
+            <tr><th><input type="checkbox" class="form-check-input select-all-produtos"></th><th>Produto</th><th>Estoque Atual</th><th>Recebendo</th><th>Consumo Diário</th><th>Necessidade Total</th><th>Qtd. Sugerida</th><th>Status</th><th>Fornecedor</th><th>Ação</th></tr>
           </thead>
           <tbody>
     `;
     produtos.forEach(p => {
-      const consSem = calcularConsumoSemanal(p.consumo_medio_mensal);
-      const consDiario = calcularConsumoDiario(consSem);
-      const dias = calcularDiasEstoque(p.estoque_atual, consDiario);
-      const min = calcularEstoqueMinimo(consDiario);
-      const sugerida = quantidadeSugerida(consSem, min, p.estoque_atual);
-      const status = calcularStatus(dias);
-      const badge = `badge-status badge-${status.toLowerCase()}`;
+      const consDiario = calcularConsumoDiario(p.consumo_medio_mensal || 0);
+      const status = calcularStatus({ consumo_medio_mensal: p.consumo_medio_mensal || 0, estoque_atual: p.estoque_atual || 0 });
+      const badge = `badge-status ${sgcCore ? sgcCore.calcularStatusBadge(status) : (status === 'URGENTE' ? 'badge-vermelho' : status === 'ATENÇÃO' ? 'badge-amarelo' : status === 'EXCESSO' ? 'badge bg-warning text-dark' : status === 'MONITORAR' || status === 'SEM HISTÓRICO' ? 'badge bg-secondary' : 'badge-verde')}`;
       const fornecedorNome = p.fornecedor_id ? fornecedorMap[p.fornecedor_id] || 'Não definido' : 'Não definido';
+      const necessidadeTotal = sgcCore ? sgcCore.calcularNecessidadeTotal(consDiario) : (consDiario * (parametros.dias_producao + parametros.lead_time));
+      const sugestao = sgcCore ? sgcCore.calcularQuantidadeSugerida(consDiario, p.estoque_atual, p.recebendo || 0) : Math.max(0, Math.ceil((consDiario * (parametros.dias_producao + parametros.lead_time)) - p.estoque_atual - (p.recebendo || 0)));
       html += `
         <tr>
+          <td><input type="checkbox" class="form-check-input produto-selecionado" value="${p.id}"></td>
           <td>${p.descricao}</td>
           <td>${p.estoque_atual}</td>
-          <td>${consSem.toFixed(2)}</td>
-          <td>${dias === Infinity ? '∞' : dias.toFixed(1)} <span class="${badge}">${status}</span></td>
-          <td>${min}</td>
-          <td><input type="number" class="form-control form-control-sm qtd-sugerida" value="${Math.ceil(sugerida)}" style="width:100px;" data-id="${p.id}"></td>
+          <td>${p.recebendo || 0}</td>
+          <td>${consDiario.toFixed(2)}</td>
+          <td>${necessidadeTotal.toFixed(2)}</td>
+          <td><input type="number" class="form-control form-control-sm qtd-sugerida" value="${Math.ceil(sugestao)}" style="width:100px;" data-id="${p.id}"></td>
+          <td><span class="${badge}">${status}</span></td>
           <td>${fornecedorNome}</td>
-          <td><button class="btn btn-sm btn-success gerar-pedido" data-id="${p.id}"><i class="bi bi-cart-plus"></i> Gerar Pedido</button></td>
+          <td><button class="btn btn-sm btn-outline-primary gerar-cotacao" data-id="${p.id}"><i class="bi bi-file-earmark-text"></i> Cotar</button></td>
         </tr>
       `;
     });
     html += `</tbody></table></div>`;
     document.getElementById('page-necessidade').innerHTML = html;
 
-    document.querySelectorAll('.gerar-pedido').forEach(btn => {
+    document.querySelector('.select-all-produtos')?.addEventListener('change', (e) => {
+      document.querySelectorAll('.produto-selecionado').forEach(checkbox => {
+        checkbox.checked = e.target.checked;
+      });
+    });
+
+    document.getElementById('btnSalvarParametros')?.addEventListener('click', async () => {
+      atualizarParametrosSgc({
+        dias_producao: parseInt(document.getElementById('paramDiasProducao').value) || 7,
+        lead_time: parseInt(document.getElementById('paramLeadTime').value) || 3,
+        cobertura_minima: parseInt(document.getElementById('paramCoberturaMinima').value) || 10,
+        limite_excesso: parseInt(document.getElementById('paramLimiteExcesso').value) || 20,
+      });
+      await renderNecessidade();
+      renderProdutos();
+      renderDashboard();
+    });
+
+    document.getElementById('btnGerarCotacaoSelecionada')?.addEventListener('click', async () => {
+      const selecionados = Array.from(document.querySelectorAll('.produto-selecionado:checked')).map(checkbox => parseInt(checkbox.value));
+      if (selecionados.length === 0) {
+        alert('Selecione pelo menos um produto para gerar a cotação.');
+        return;
+      }
+      const quantidades = {};
+      selecionados.forEach(produtoId => {
+        const input = document.querySelector(`.qtd-sugerida[data-id="${produtoId}"]`);
+        quantidades[produtoId] = parseInt(input?.value || 0) || 0;
+      });
+      abrirModalCotacao(null, selecionados, quantidades);
+    });
+
+    document.querySelectorAll('.gerar-cotacao').forEach(btn => {
       btn.addEventListener('click', async () => {
         const produtoId = parseInt(btn.dataset.id);
         const input = document.querySelector(`.qtd-sugerida[data-id="${produtoId}"]`);
-        const quantidade = parseInt(input.value) || 0;
-        if (quantidade <= 0) { alert('Quantidade deve ser maior que zero'); return; }
-        const produto = await getById('produtos', produtoId);
-        if (!produto) return;
-        if (!produto.fornecedor_id) { alert('Produto sem fornecedor definido. Cadastre um fornecedor primeiro.'); return; }
-        const pedido = {
-          data: new Date().toISOString().split('T')[0],
-          fornecedor_id: produto.fornecedor_id,
-          itens: [{ produto_id: produtoId, quantidade: quantidade, preco_unitario: produto.ultimo_preco || 0, total: (produto.ultimo_preco || 0) * quantidade }],
-          total: (produto.ultimo_preco || 0) * quantidade,
-          status: 'Pendente'
-        };
-        await add('pedidos', pedido);
-        alert('Pedido gerado com sucesso!');
-        renderNecessidade();
+        const quantidade = parseInt(input?.value || 0) || 0;
+        if (quantidade <= 0) {
+          alert('Quantidade deve ser maior que zero');
+          return;
+        }
+        abrirModalCotacao(null, [produtoId], { [produtoId]: quantidade });
       });
     });
   }
 
   async function renderFornecedores() {
     const fornecedores = await getAll('fornecedores');
+    const produtos = await getAll('produtos');
+    const relacoes = await getAll('produto_fornecedor');
+    const historicoPrecos = await getAll('historico_precos');
     let html = `
       <div class="d-flex justify-content-between mb-3">
         <h4>Fornecedores</h4>
@@ -533,18 +1009,22 @@
       </div>
       <div class="table-responsive">
         <table class="table table-bordered">
-          <thead><tr><th>Nome</th><th>Contato</th><th>Telefone</th><th>Prazo (dias)</th><th>Ações</th></tr></thead>
+          <thead><tr><th>Nome</th><th>Contato</th><th>Telefone</th><th>Prazo (dias)</th><th>Ativo</th><th>Ações</th></tr></thead>
           <tbody>
     `;
     fornecedores.forEach(f => {
+      const ligacoes = relacoes.filter(r => String(r.fornecedor_id) === String(f.id));
+      const compras = historicoPrecos.filter(h => String(h.fornecedor_id) === String(f.id)).length;
       html += `
         <tr>
           <td>${f.nome}</td>
           <td>${f.contato || ''}</td>
           <td>${f.telefone || ''}</td>
-          <td>${f.prazo_entrega || 3}</td>
+          <td>${f.prazo_medio_entrega || f.prazo_entrega || 3}</td>
+          <td>${f.ativo === false ? 'Não' : 'Sim'}</td>
           <td>
             <button class="btn btn-sm btn-outline-primary editar-fornecedor" data-id="${f.id}"><i class="bi bi-pencil"></i></button>
+            <button class="btn btn-sm btn-outline-info associar-fornecedor" data-id="${f.id}"><i class="bi bi-diagram-3"></i></button>
             <button class="btn btn-sm btn-outline-danger excluir-fornecedor" data-id="${f.id}"><i class="bi bi-trash"></i></button>
           </td>
         </tr>
@@ -560,6 +1040,12 @@
         if (f) abrirModalFornecedor(f);
       });
     });
+    document.querySelectorAll('.associar-fornecedor').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        abrirModalProdutoFornecedor(null, id);
+      });
+    });
     document.querySelectorAll('.excluir-fornecedor').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (confirm('Deseja excluir este fornecedor?')) {
@@ -572,6 +1058,7 @@
 
   async function renderCotacoes() {
     const cotacoes = await getAll('cotacoes');
+    const itensCotacao = await getAll('itens_cotacao');
     const produtos = await getAll('produtos');
     const fornecedores = await getAll('fornecedores');
     const prodMap = {}; produtos.forEach(p => prodMap[p.id] = p.descricao);
@@ -584,39 +1071,204 @@
       </div>
       <div class="table-responsive">
         <table class="table table-bordered">
-          <thead><tr><th>Data</th><th>Produto</th><th>Fornecedor</th><th>Preço</th><th>Quantidade</th><th>Prazo</th><th>Ações</th></tr></thead>
+          <thead><tr><th>Data</th><th>Fornecedor</th><th>Status</th><th>Itens</th><th>Menor Preço</th><th>Ações</th></tr></thead>
           <tbody>
     `;
-    cotacoes.forEach(c => {
+    for (const cotacao of cotacoes) {
+      const itens = itensCotacao.filter(item => item.cotacao_id === cotacao.id);
+      const menor = itens.length ? Math.min(...itens.map(item => item.preco_unitario || 0)) : 0;
       html += `
         <tr>
-          <td>${c.data}</td>
-          <td>${prodMap[c.produto_id] || c.produto_id}</td>
-          <td>${fornMap[c.fornecedor_id] || c.fornecedor_id}</td>
-          <td>R$ ${c.preco.toFixed(2)}</td>
-          <td>${c.quantidade}</td>
-          <td>${c.prazo_entrega}</td>
+          <td>${cotacao.data}</td>
+          <td>${fornMap[cotacao.fornecedor_id] || cotacao.fornecedor_id}</td>
+          <td>${cotacao.status || 'Pendente'}</td>
+          <td>${itens.map(item => `${prodMap[item.produto_id] || item.produto_id} (${item.quantidade})`).join('; ')}</td>
+          <td>R$ ${menor.toFixed(2)}</td>
           <td>
-            <button class="btn btn-sm btn-outline-danger excluir-cotacao" data-id="${c.id}"><i class="bi bi-trash"></i></button>
+            <button class="btn btn-sm btn-outline-success criar-pedido" data-id="${cotacao.id}"><i class="bi bi-cart-plus"></i> Criar Pedido</button>
+            <button class="btn btn-sm btn-outline-danger excluir-cotacao" data-id="${cotacao.id}"><i class="bi bi-trash"></i></button>
           </td>
         </tr>
       `;
-    });
+    }
     html += `</tbody></table></div>`;
     document.getElementById('page-cotacoes').innerHTML = html;
+
+    document.querySelectorAll('.criar-pedido').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = parseInt(btn.dataset.id);
+        const cotacao = await getById('cotacoes', id);
+        if (!cotacao) return;
+        const itens = await getAll('itens_cotacao');
+        const itensCotacao = itens.filter(item => item.cotacao_id === id && (item.quantidade || 0) > 0);
+        if (!itensCotacao.length) {
+          alert('Cotação sem itens para criar pedido.');
+          return;
+        }
+        if (!cotacao.fornecedor_id) {
+          alert('Cotação sem fornecedor. Não é possível criar pedido.');
+          return;
+        }
+        const pedido = {
+          data: new Date().toISOString().split('T')[0],
+          fornecedor_id: cotacao.fornecedor_id,
+          status: 'PENDENTE',
+          valor_total: itensCotacao.reduce((sum, item) => sum + ((item.preco_unitario || 0) * item.quantidade), 0),
+        };
+        const pedidoId = await add('pedidos_compra', pedido);
+        for (const item of itensCotacao) {
+          await add('itens_pedido', {
+            pedido_id: pedidoId,
+            produto_id: item.produto_id,
+            quantidade: item.quantidade,
+            valor_unitario: item.preco_unitario || 0,
+            recebido: 0,
+            saldo_pendente: item.quantidade,
+          });
+          await registrarHistoricoPreco({
+            produto_id: item.produto_id,
+            fornecedor_id: cotacao.fornecedor_id,
+            data: cotacao.data,
+            preco_unitario: item.preco_unitario || 0,
+            quantidade: item.quantidade,
+            origem: 'cotação',
+          });
+        }
+        await registrarEvento('pedido criado', `pedido:${pedidoId}`, `Pedido criado para o fornecedor ${cotacao.fornecedor_id} com ${itensCotacao.length} itens.`);
+        alert('Pedido criado com sucesso!');
+        renderCotacoes();
+        renderPedidos();
+        renderDashboard();
+      });
+    });
 
     document.querySelectorAll('.excluir-cotacao').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (confirm('Excluir cotação?')) {
-          await del('cotacoes', parseInt(btn.dataset.id));
+          const id = parseInt(btn.dataset.id);
+          const itens = await getAll('itens_cotacao');
+          for (const item of itens.filter(i => i.cotacao_id === id)) {
+            await del('itens_cotacao', item.id);
+          }
+          await del('cotacoes', id);
           renderCotacoes();
         }
       });
     });
   }
 
+  function abrirModalRecebimentoPedido(pedido, itensPedido) {
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'modalRecebimentoPedido';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Receber Pedido #${pedido.id}</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-muted">Informe a quantidade a receber para cada item. O valor padrão é o saldo pendente.</p>
+            <div id="recebimentoItens"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="salvarRecebimento">Salvar Recebimento</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const modalInstance = new bootstrap.Modal(modal);
+    modalInstance.show();
+
+    const produtos = getAll('produtos')
+      .then(produtosDb => {
+        const prodMap = {}; produtosDb.forEach(p => prodMap[p.id] = p);
+        const container = document.getElementById('recebimentoItens');
+        container.innerHTML = itensPedido.map(item => {
+          const produto = prodMap[item.produto_id];
+          const saldoPendente = toNumber(item.quantidade) - toNumber(item.recebido);
+          return `
+            <div class="row g-2 mb-2 align-items-center">
+              <div class="col-md-6">
+                <div>${produto?.descricao || item.produto_id}</div>
+                <small class="text-muted">Saldo pendente: ${saldoPendente}</small>
+              </div>
+              <div class="col-md-6">
+                <input type="number" class="form-control form-control-sm recebimento-quantidade" data-item-id="${item.id}" value="${saldoPendente}" min="0" max="${saldoPendente}" step="0.01">
+              </div>
+            </div>
+          `;
+        }).join('');
+      });
+
+    document.getElementById('salvarRecebimento').addEventListener('click', async () => {
+      await produtos;
+      const inputs = document.querySelectorAll('.recebimento-quantidade');
+      let recebidoTotal = 0;
+      let teveRecebimento = false;
+
+      for (const input of inputs) {
+        const itemId = parseInt(input.dataset.itemId);
+        const item = itensPedido.find(i => i.id === itemId);
+        if (!item) continue;
+        const saldoPendente = toNumber(item.quantidade) - toNumber(item.recebido);
+        const quantidadeRecebida = parseFloat(input.value) || 0;
+        if (quantidadeRecebida < 0) {
+          alert('A quantidade recebida não pode ser negativa.');
+          return;
+        }
+        if (quantidadeRecebida > saldoPendente) {
+          alert(`A quantidade recebida para o item ${itemId} excede o saldo pendente.`);
+          return;
+        }
+        if (quantidadeRecebida <= 0) continue;
+        teveRecebimento = true;
+        item.recebido = toNumber(item.recebido) + quantidadeRecebida;
+        item.saldo_pendente = Math.max(0, toNumber(item.quantidade) - toNumber(item.recebido));
+        await put('itens_pedido', item);
+        recebidoTotal += quantidadeRecebida;
+
+        const produto = await getById('produtos', item.produto_id);
+        if (produto) {
+          produto.estoque_atual = toNumber(produto.estoque_atual) + quantidadeRecebida;
+          produto.ultimo_preco = toNumber(item.valor_unitario) || produto.ultimo_preco || 0;
+          produto.data_ultima_compra = pedido.data;
+          await put('produtos', produto);
+        }
+        await add('historicos', {
+          data: pedido.data,
+          produto_id: item.produto_id,
+          fornecedor_id: pedido.fornecedor_id,
+          quantidade: quantidadeRecebida,
+          preco_unitario: toNumber(item.valor_unitario),
+          total: toNumber(item.valor_unitario) * quantidadeRecebida,
+        });
+      }
+
+      if (!teveRecebimento) {
+        alert('Informe ao menos uma quantidade para receber.');
+        return;
+      }
+
+      pedido.status = calcularStatusPedido(itensPedido);
+      await put('pedidos_compra', pedido);
+      await registrarEvento('recebimento realizado', `pedido:${pedido.id}`, `Recebimento realizado com ${recebidoTotal} unidades. Status atualizado para ${pedido.status}.`);
+      modalInstance.hide();
+      renderPedidos();
+      renderDashboard();
+      renderProdutos();
+    });
+
+    modal.addEventListener('hidden.bs.modal', () => modal.remove());
+  }
+
   async function renderPedidos() {
-    const pedidos = await getAll('pedidos');
+    const pedidos = await getAll('pedidos_compra');
+    const itensPedido = await getAll('itens_pedido');
     const fornecedores = await getAll('fornecedores');
     const produtos = await getAll('produtos');
     const fornMap = {}; fornecedores.forEach(f => fornMap[f.id] = f.nome);
@@ -630,16 +1282,19 @@
           <tbody>
     `;
     pedidos.forEach(ped => {
-      const itensStr = ped.itens.map(item => `${prodMap[item.produto_id] || item.produto_id} (${item.quantidade})`).join('; ');
+      const itensDoPedido = itensPedido.filter(item => item.pedido_id === ped.id);
+      const itensStr = itensDoPedido.map(item => `${prodMap[item.produto_id] || item.produto_id} (${item.quantidade})`).join('; ');
+      const statusPedido = calcularStatusPedido(itensDoPedido);
+      const totalPedido = itensDoPedido.reduce((sum, item) => sum + toNumber(item.valor_unitario) * toNumber(item.quantidade), 0);
       html += `
         <tr>
           <td>${ped.data}</td>
           <td>${fornMap[ped.fornecedor_id] || ped.fornecedor_id}</td>
           <td>${itensStr}</td>
-          <td>R$ ${ped.total.toFixed(2)}</td>
-          <td>${ped.status}</td>
+          <td>R$ ${totalPedido.toFixed(2)}</td>
+          <td>${statusPedido}</td>
           <td>
-            <button class="btn btn-sm btn-outline-success finalizar-pedido" data-id="${ped.id}"><i class="bi bi-check"></i> Receber</button>
+            <button class="btn btn-sm btn-outline-success finalizar-pedido" data-id="${ped.id}" ${statusPedido === 'RECEBIDO' ? 'disabled' : ''}><i class="bi bi-check"></i> Receber</button>
             <button class="btn btn-sm btn-outline-secondary imprimir-pedido" data-id="${ped.id}"><i class="bi bi-printer"></i></button>
           </td>
         </tr>
@@ -651,40 +1306,30 @@
     document.querySelectorAll('.finalizar-pedido').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = parseInt(btn.dataset.id);
-        const pedido = await getById('pedidos', id);
+        const pedido = await getById('pedidos_compra', id);
         if (!pedido) return;
-        pedido.status = 'Recebido';
-        await put('pedidos', pedido);
-        for (const item of pedido.itens) {
-          await add('historicos', {
-            data: pedido.data,
-            produto_id: item.produto_id,
-            fornecedor_id: pedido.fornecedor_id,
-            quantidade: item.quantidade,
-            preco_unitario: item.preco_unitario,
-            total: item.total
-          });
+        const itensPedido = await getAll('itens_pedido');
+        const itensDoPedido = itensPedido.filter(item => item.pedido_id === id);
+        if (!itensDoPedido.length) {
+          alert('Pedido sem itens.');
+          return;
         }
-        for (const item of pedido.itens) {
-          const produto = await getById('produtos', item.produto_id);
-          if (produto) {
-            produto.estoque_atual += item.quantidade;
-            produto.ultimo_preco = item.preco_unitario;
-            produto.data_ultima_compra = pedido.data;
-            await put('produtos', produto);
-          }
+        if (pedido.status === 'RECEBIDO') {
+          alert('Pedido já finalizado.');
+          return;
         }
-        renderPedidos();
-        renderDashboard();
+        abrirModalRecebimentoPedido(pedido, itensDoPedido);
       });
     });
 
     document.querySelectorAll('.imprimir-pedido').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = parseInt(btn.dataset.id);
-        const pedido = await getById('pedidos', id);
+        const pedido = await getById('pedidos_compra', id);
         if (!pedido) return;
         const win = window.open('', '_blank');
+        const itensDoPedido = await getAll('itens_pedido');
+        const itens = itensDoPedido.filter(item => item.pedido_id === id);
         win.document.write(`
           <html><head><title>Pedido ${id}</title><style>body { font-family: Arial; } table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }</style></head>
           <body>
@@ -692,11 +1337,11 @@
             <p>Data: ${pedido.data}</p>
             <p>Fornecedor: ${fornMap[pedido.fornecedor_id] || pedido.fornecedor_id}</p>
             <table><thead><tr><th>Produto</th><th>Quantidade</th><th>Preço Unit.</th><th>Total</th></tr></thead><tbody>
-              ${pedido.itens.map(item => `
-                <tr><td>${prodMap[item.produto_id] || item.produto_id}</td><td>${item.quantidade}</td><td>R$ ${item.preco_unitario.toFixed(2)}</td><td>R$ ${item.total.toFixed(2)}</td></tr>
+              ${itens.map(item => `
+                <tr><td>${prodMap[item.produto_id] || item.produto_id}</td><td>${item.quantidade}</td><td>R$ ${toNumber(item.valor_unitario).toFixed(2)}</td><td>R$ ${(toNumber(item.valor_unitario) * toNumber(item.quantidade)).toFixed(2)}</td></tr>
               `).join('')}
             </tbody></table>
-            <p><strong>Total: R$ ${pedido.total.toFixed(2)}</strong></p>
+            <p><strong>Total: R$ ${toNumber(pedido.valor_total).toFixed(2)}</strong></p>
           </body></html>
         `);
         win.document.close();
@@ -779,10 +1424,76 @@
           document.getElementById('importPreview').innerHTML = preview;
 
           document.getElementById('confirmarImportacao').addEventListener('click', async () => {
+            const produtosExistentes = await getAll('produtos');
+            const mapaCodigo = new Map();
+            const mapaDescricao = new Map();
+            produtosExistentes.forEach(produto => {
+              if (produto.codigo) mapaCodigo.set(normalizeText(produto.codigo), produto);
+              if (produto.descricao) mapaDescricao.set(normalizeText(produto.descricao), produto);
+            });
+
+            let criados = 0;
+            let atualizados = 0;
             for (const p of produtos) {
-              await add('produtos', p);
+              const codigoOrigem = typeof p.codigo === 'string' ? p.codigo.trim() : '';
+              const codigoNormalizado = normalizeText(codigoOrigem);
+              const descricaoNormalizada = normalizeText(p.descricao || '');
+              let produtoExistente = null;
+
+              if (codigoNormalizado) {
+                produtoExistente = mapaCodigo.get(codigoNormalizado) || null;
+              }
+              if (!produtoExistente && descricaoNormalizada) {
+                produtoExistente = mapaDescricao.get(descricaoNormalizada) || null;
+              }
+
+              if (produtoExistente) {
+                produtoExistente.estoque_atual = toNumber(p.estoque_atual || produtoExistente.estoque_atual || 0);
+                produtoExistente.consumo_medio_mensal = toNumber(p.consumo_medio_mensal || produtoExistente.consumo_medio_mensal || 0);
+                produtoExistente.saldo_inicial = toNumber(p.saldo_inicial || produtoExistente.saldo_inicial || 0);
+                produtoExistente.recebendo = toNumber(p.recebendo || produtoExistente.recebendo || 0);
+                produtoExistente.saldo_final = toNumber(p.saldo_final || produtoExistente.saldo_final || 0);
+                produtoExistente.codigo_origem = produtoExistente.codigo_origem || codigoOrigem || '';
+                produtoExistente.descricao = produtoExistente.descricao || p.descricao || '';
+                produtoExistente.tipo_compra = produtoExistente.tipo_compra || p.tipo_compra || 'Produção normal';
+                produtoExistente.ultimo_preco = produtoExistente.ultimo_preco || p.ultimo_preco || 0;
+                produtoExistente.data_ultima_compra = produtoExistente.data_ultima_compra || p.data_ultima_compra || null;
+                if (!produtoExistente.codigo && !produtoExistente.codigo_interno && !codigoNormalizado) {
+                  produtoExistente.codigo_interno = getNextInternalCode(produtosExistentes);
+                }
+                await put('produtos', produtoExistente);
+                atualizados += 1;
+                continue;
+              }
+
+              const codigoInterno = codigoNormalizado ? '' : getNextInternalCode(produtosExistentes);
+              const novoProduto = {
+                codigo: codigoNormalizado ? codigoOrigem : '',
+                codigo_origem: codigoNormalizado ? codigoOrigem : '',
+                codigo_interno: codigoInterno,
+                descricao: p.descricao || '',
+                categoria: p.categoria || '',
+                unidade: p.unidade || '',
+                estoque_atual: toNumber(p.estoque_atual || 0),
+                consumo_medio_mensal: toNumber(p.consumo_medio_mensal || 0),
+                saldo_inicial: toNumber(p.saldo_inicial || 0),
+                recebendo: toNumber(p.recebendo || 0),
+                avariado: toNumber(p.avariado || 0),
+                saldo_final: toNumber(p.saldo_final || 0),
+                fornecedor_id: p.fornecedor_id || null,
+                ultimo_preco: toNumber(p.ultimo_preco || 0),
+                data_ultima_compra: p.data_ultima_compra || null,
+                tipo_compra: p.tipo_compra || 'Produção normal',
+              };
+              await add('produtos', novoProduto);
+              criados += 1;
+              produtosExistentes.push(novoProduto);
+              if (novoProduto.codigo) mapaCodigo.set(normalizeText(novoProduto.codigo), novoProduto);
+              if (novoProduto.descricao) mapaDescricao.set(normalizeText(novoProduto.descricao), novoProduto);
             }
-            alert(`${produtos.length} produtos importados com sucesso!`);
+
+            await registrarEvento('importação realizada', 'importacao', `Importação concluída: ${criados} criados e ${atualizados} atualizados.`);
+            alert(`${produtos.length} produtos processados (${criados} novos, ${atualizados} atualizados).`);
             document.getElementById('importPreview').innerHTML = '';
             renderDashboard();
             renderProdutos();
@@ -818,6 +1529,11 @@
             <div class="mb-2"><label>Descrição</label><input class="form-control" id="produtoDescricao" value="${isEdit ? produto.descricao : ''}"></div>
             <div class="mb-2"><label>Categoria</label><input class="form-control" id="produtoCategoria" value="${isEdit ? produto.categoria : ''}"></div>
             <div class="mb-2"><label>Unidade</label><input class="form-control" id="produtoUnidade" value="${isEdit ? produto.unidade : ''}"></div>
+            <div class="mb-2"><label>Classificação de Compra</label>
+              <select class="form-select" id="produtoTipoCompra">
+                ${['Produção normal','Campanha','Estoque','Emergencial'].map(tipo => `<option value="${tipo}" ${isEdit && produto.tipo_compra === tipo ? 'selected' : ''}>${tipo}</option>`).join('')}
+              </select>
+            </div>
             <div class="mb-2"><label>Estoque Atual</label><input type="number" class="form-control" id="produtoEstoque" value="${isEdit ? produto.estoque_atual : 0}"></div>
             <div class="mb-2"><label>Consumo Médio Mensal</label><input type="number" class="form-control" id="produtoConsumo" value="${isEdit ? produto.consumo_medio_mensal : 0}"></div>
             <div class="mb-2"><label>Último Preço</label><input type="number" step="0.01" class="form-control" id="produtoPreco" value="${isEdit ? produto.ultimo_preco : 0}"></div>
@@ -840,12 +1556,13 @@
       const descricao = document.getElementById('produtoDescricao').value;
       const categoria = document.getElementById('produtoCategoria').value;
       const unidade = document.getElementById('produtoUnidade').value;
+      const tipo_compra = document.getElementById('produtoTipoCompra').value;
       const estoque_atual = parseFloat(document.getElementById('produtoEstoque').value) || 0;
       const consumo_medio_mensal = parseFloat(document.getElementById('produtoConsumo').value) || 0;
       const ultimo_preco = parseFloat(document.getElementById('produtoPreco').value) || 0;
       const fornecedor_id = parseInt(document.getElementById('produtoFornecedor').value) || null;
 
-      const data = { codigo, descricao, categoria, unidade, estoque_atual, consumo_medio_mensal, ultimo_preco, fornecedor_id };
+      const data = { codigo, descricao, categoria, unidade, tipo_compra, estoque_atual, consumo_medio_mensal, ultimo_preco, fornecedor_id };
       if (id) {
         data.id = parseInt(id);
         await put('produtos', data);
@@ -877,9 +1594,13 @@
           <div class="modal-body">
             <input type="hidden" id="fornecedorId" value="${isEdit ? fornecedor.id : ''}">
             <div class="mb-2"><label>Nome</label><input class="form-control" id="fornecedorNome" value="${isEdit ? fornecedor.nome : ''}"></div>
+            <div class="mb-2"><label>CNPJ</label><input class="form-control" id="fornecedorCnpj" value="${isEdit ? fornecedor.cnpj || '' : ''}"></div>
             <div class="mb-2"><label>Contato</label><input class="form-control" id="fornecedorContato" value="${isEdit ? fornecedor.contato : ''}"></div>
             <div class="mb-2"><label>Telefone</label><input class="form-control" id="fornecedorTelefone" value="${isEdit ? fornecedor.telefone : ''}"></div>
-            <div class="mb-2"><label>Prazo Entrega (dias)</label><input type="number" class="form-control" id="fornecedorPrazo" value="${isEdit ? fornecedor.prazo_entrega : 3}"></div>
+            <div class="mb-2"><label>E-mail</label><input class="form-control" id="fornecedorEmail" value="${isEdit ? fornecedor.email || '' : ''}"></div>
+            <div class="mb-2"><label>Prazo Médio Entrega (dias)</label><input type="number" class="form-control" id="fornecedorPrazo" value="${isEdit ? fornecedor.prazo_medio_entrega || fornecedor.prazo_entrega || 3 : 3}"></div>
+            <div class="mb-2"><label>Observação</label><textarea class="form-control" id="fornecedorObservacao">${isEdit ? fornecedor.observacao || '' : ''}</textarea></div>
+            <div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="fornecedorAtivo" ${isEdit ? (fornecedor.ativo === false ? '' : 'checked') : 'checked'}><label class="form-check-label">Ativo</label></div>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -894,12 +1615,22 @@
 
     document.getElementById('salvarFornecedor').addEventListener('click', async () => {
       const id = document.getElementById('fornecedorId').value;
-      const nome = document.getElementById('fornecedorNome').value;
-      const contato = document.getElementById('fornecedorContato').value;
-      const telefone = document.getElementById('fornecedorTelefone').value;
-      const prazo_entrega = parseInt(document.getElementById('fornecedorPrazo').value) || 3;
+      const nome = document.getElementById('fornecedorNome').value.trim();
+      const cnpj = document.getElementById('fornecedorCnpj').value.trim();
+      const contato = document.getElementById('fornecedorContato').value.trim();
+      const telefone = document.getElementById('fornecedorTelefone').value.trim();
+      const email = document.getElementById('fornecedorEmail').value.trim();
+      const prazo_medio_entrega = parseInt(document.getElementById('fornecedorPrazo').value) || 3;
+      const observacao = document.getElementById('fornecedorObservacao').value.trim();
+      const ativo = document.getElementById('fornecedorAtivo').checked;
+      const fornecedores = await getAll('fornecedores');
+      const duplicado = fornecedores.find(item => String(item.id) !== String(id || '') && normalizeText(item.nome) === normalizeText(nome));
+      if (duplicado) {
+        alert('Já existe um fornecedor com este nome.');
+        return;
+      }
 
-      const data = { nome, contato, telefone, prazo_entrega };
+      const data = { nome, cnpj, contato, telefone, email, prazo_medio_entrega, observacao, ativo };
       if (id) {
         data.id = parseInt(id);
         await put('fornecedores', data);
@@ -913,8 +1644,199 @@
     modal.addEventListener('hidden.bs.modal', () => modal.remove());
   }
 
-  function abrirModalCotacao(cotacao = null) {
-    alert('Funcionalidade de cotação será implementada via modal.');
+  function abrirModalProdutoFornecedor(relacao = null, fornecedorId = null) {
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'modalProdutoFornecedor';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Associar Produto ao Fornecedor</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="produtoFornecedorId" value="${relacao ? relacao.id : ''}">
+            <div class="mb-2">
+              <label>Produto</label>
+              <select class="form-select" id="produtoFornecedorProduto"></select>
+            </div>
+            <div class="mb-2">
+              <label>Fornecedor</label>
+              <select class="form-select" id="produtoFornecedorFornecedor"></select>
+            </div>
+            <div class="mb-2"><label>Código do Fornecedor</label><input class="form-control" id="produtoFornecedorCodigo" value="${relacao ? relacao.codigo_fornecedor || '' : ''}"></div>
+            <div class="mb-2"><label>Último Preço</label><input type="number" step="0.01" class="form-control" id="produtoFornecedorPreco" value="${relacao ? relacao.ultimo_preco || 0 : 0}"></div>
+            <div class="mb-2"><label>Data Último Preço</label><input type="date" class="form-control" id="produtoFornecedorData" value="${relacao ? relacao.data_ultimo_preco || '' : ''}"></div>
+            <div class="mb-2"><label>Prazo Entrega</label><input type="number" class="form-control" id="produtoFornecedorPrazo" value="${relacao ? relacao.prazo_entrega || 3 : 3}"></div>
+            <div class="mb-2"><label>Quantidade Mínima</label><input type="number" class="form-control" id="produtoFornecedorMinimo" value="${relacao ? relacao.quantidade_minima || 0 : 0}"></div>
+            <div class="mb-2"><label>Observação</label><textarea class="form-control" id="produtoFornecedorObservacao">${relacao ? relacao.observacao || '' : ''}</textarea></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="salvarProdutoFornecedor">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const modalInstance = new bootstrap.Modal(modal);
+    modalInstance.show();
+
+    (async () => {
+      const produtos = await getAll('produtos');
+      const fornecedores = await getAll('fornecedores');
+      const produtoSelect = document.getElementById('produtoFornecedorProduto');
+      const fornecedorSelect = document.getElementById('produtoFornecedorFornecedor');
+      produtoSelect.innerHTML = produtos.map(produto => `<option value="${produto.id}" ${relacao && String(relacao.produto_id) === String(produto.id) ? 'selected' : ''}>${produto.descricao}</option>`).join('');
+      fornecedorSelect.innerHTML = fornecedores.map(fornecedor => `<option value="${fornecedor.id}" ${fornecedorId && String(fornecedorId) === String(fornecedor.id) ? 'selected' : ''}>${fornecedor.nome}</option>`).join('');
+      if (!relacao && fornecedorId) {
+        fornecedorSelect.value = fornecedorId;
+      }
+    })();
+
+    document.getElementById('salvarProdutoFornecedor').addEventListener('click', async () => {
+      const id = document.getElementById('produtoFornecedorId').value;
+      const produto_id = parseInt(document.getElementById('produtoFornecedorProduto').value);
+      const fornecedor_id = parseInt(document.getElementById('produtoFornecedorFornecedor').value);
+      const codigo_fornecedor = document.getElementById('produtoFornecedorCodigo').value.trim();
+      const ultimo_preco = parseFloat(document.getElementById('produtoFornecedorPreco').value) || 0;
+      const data_ultimo_preco = document.getElementById('produtoFornecedorData').value;
+      const prazo_entrega = parseInt(document.getElementById('produtoFornecedorPrazo').value) || 3;
+      const quantidade_minima = parseInt(document.getElementById('produtoFornecedorMinimo').value) || 0;
+      const observacao = document.getElementById('produtoFornecedorObservacao').value.trim();
+      const relacoes = await getAll('produto_fornecedor');
+      const duplicado = relacoes.find(item => String(item.id) !== String(id || '') && String(item.produto_id) === String(produto_id) && String(item.fornecedor_id) === String(fornecedor_id));
+      if (duplicado) {
+        alert('Esta associação produto-fornecedor já existe.');
+        return;
+      }
+
+      const data = { produto_id, fornecedor_id, codigo_fornecedor, ultimo_preco, data_ultimo_preco, prazo_entrega, quantidade_minima, observacao };
+      if (id) {
+        data.id = parseInt(id);
+        await put('produto_fornecedor', data);
+      } else {
+        await add('produto_fornecedor', data);
+      }
+      modalInstance.hide();
+      renderFornecedores();
+      renderDashboard();
+      renderNecessidade();
+    });
+
+    modal.addEventListener('hidden.bs.modal', () => modal.remove());
+  }
+
+  function abrirModalCotacao(cotacao = null, produtosSelecionados = [], quantidadesMap = {}) {
+    const modal = document.createElement('div');
+    modal.className = 'modal fade';
+    modal.id = 'modalCotacao';
+    modal.tabIndex = -1;
+    modal.innerHTML = `
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Nova Cotação</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label>Data</label>
+              <input type="date" class="form-control" id="cotacaoData" value="${new Date().toISOString().split('T')[0]}">
+            </div>
+            <div class="mb-3">
+              <label>Fornecedor</label>
+              <select class="form-select" id="cotacaoFornecedor"></select>
+            </div>
+            <div class="mb-3">
+              <label>Status</label>
+              <select class="form-select" id="cotacaoStatus">
+                <option value="Pendente">Pendente</option>
+                <option value="Aprovada">Aprovada</option>
+                <option value="Rejeitada">Rejeitada</option>
+              </select>
+            </div>
+            <div class="mb-3">
+              <label>Itens</label>
+              <div id="cotacaoItens"></div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="salvarCotacao">Salvar</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const modalInstance = new bootstrap.Modal(modal);
+    modalInstance.show();
+
+    (async () => {
+      const fornecedores = await getAll('fornecedores');
+      const produtos = await getAll('produtos');
+      const fornecedorSelect = document.getElementById('cotacaoFornecedor');
+      const itensContainer = document.getElementById('cotacaoItens');
+      const produtosParaExibir = produtosSelecionados.length ? produtos.filter(p => produtosSelecionados.includes(p.id)) : produtos;
+      fornecedorSelect.innerHTML = fornecedores.map(f => `<option value="${f.id}">${f.nome}</option>`).join('');
+      itensContainer.innerHTML = produtosParaExibir.map((p) => `
+        <div class="row g-2 mb-2">
+          <div class="col-md-5">
+            <input class="form-control form-control-sm" value="${p.descricao}" readonly>
+          </div>
+          <div class="col-md-2">
+            <input type="number" class="form-control form-control-sm cotacao-quantidade" data-produto="${p.id}" value="${quantidadesMap[p.id] || 0}" placeholder="Qtd">
+          </div>
+          <div class="col-md-2">
+            <input type="number" step="0.01" class="form-control form-control-sm cotacao-preco" data-produto="${p.id}" value="${p.ultimo_preco || 0}" placeholder="Preço">
+          </div>
+          <div class="col-md-3">
+            <input type="number" class="form-control form-control-sm cotacao-prazo" data-produto="${p.id}" value="${fornecedores.find(f => f.id === p.fornecedor_id)?.prazo_entrega || 3}" placeholder="Prazo">
+          </div>
+        </div>
+      `).join('');
+    })();
+
+    document.getElementById('salvarCotacao').addEventListener('click', async () => {
+      const data = document.getElementById('cotacaoData').value;
+      const fornecedor_id = parseInt(document.getElementById('cotacaoFornecedor').value);
+      const status = document.getElementById('cotacaoStatus').value;
+      if (!fornecedor_id) {
+        alert('Selecione um fornecedor para criar a cotação.');
+        return;
+      }
+      const cotacao = { data, fornecedor_id, status };
+      const cotacaoId = await add('cotacoes', cotacao);
+      const itens = [];
+      document.querySelectorAll('.cotacao-quantidade').forEach(input => {
+        const produtoId = parseInt(input.dataset.produto);
+        const quantidade = parseFloat(input.value) || 0;
+        if (quantidade <= 0) return;
+        const precoInput = document.querySelector(`.cotacao-preco[data-produto="${produtoId}"]`);
+        const prazoInput = document.querySelector(`.cotacao-prazo[data-produto="${produtoId}"]`);
+        itens.push({
+          cotacao_id: cotacaoId,
+          produto_id: produtoId,
+          quantidade,
+          preco_unitario: parseFloat(precoInput.value) || 0,
+          prazo_entrega: parseInt(prazoInput.value) || 3,
+        });
+      });
+      if (!itens.length) {
+        alert('Adicione pelo menos um item na cotação.');
+        return;
+      }
+      for (const item of itens) {
+        await add('itens_cotacao', item);
+      }
+      await registrarEvento('cotação criada', `cotacao:${cotacaoId}`, `Cotação criada para o fornecedor ${fornecedor_id} com ${itens.length} itens.`);
+      modalInstance.hide();
+      renderCotacoes();
+    });
+
+    modal.addEventListener('hidden.bs.modal', () => modal.remove());
   }
 
   // ============================================================
@@ -955,11 +1877,22 @@
     await openDB();
     document.getElementById('loading').classList.remove('show');
 
+    document.addEventListener('click', (e) => {
+      if (e.target.matches('[data-bs-target="#modalCotacao"]')) {
+        e.preventDefault();
+        abrirModalCotacao();
+      }
+    });
+
     document.querySelectorAll('.sidebar .nav-link').forEach(link => {
       link.addEventListener('click', (e) => {
         e.preventDefault();
         navigate(link.dataset.page);
       });
+    });
+
+    document.getElementById('btnPopularDadosTeste').addEventListener('click', async () => {
+      await popularDadosTeste();
     });
 
     document.getElementById('btnLimparDados').addEventListener('click', async () => {
