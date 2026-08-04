@@ -50,9 +50,25 @@
     return Number((toNumber(consumoDiario) * (parametros.dias_producao + parametros.lead_time)).toFixed(2));
   }
 
-  function calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo) {
+  function calcularRecebimentoPendente(produtoId, pedidosCompra = null, itensPedido = null) {
+    const pedidos = Array.isArray(pedidosCompra) ? pedidosCompra : [];
+    const itens = Array.isArray(itensPedido) ? itensPedido : [];
+    const statusPermitidos = ['PENDENTE', 'APROVADO', 'PARCIALMENTE_RECEBIDO'];
+
+    return itens.reduce((total, item) => {
+      const pedido = pedidos.find(p => String(p.id) === String(item.pedido_id));
+      if (!pedido) return total;
+      if (String(item.produto_id) !== String(produtoId)) return total;
+      if (!statusPermitidos.includes(String(pedido.status || '').toUpperCase())) return total;
+      const saldoPendente = Math.max(0, toNumber(item.quantidade) - toNumber(item.recebido));
+      return total + saldoPendente;
+    }, 0);
+  }
+
+  function calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo, recebimentoPendente = 0) {
     const necessidadeTotal = calcularNecessidadeTotal(consumoDiario);
-    const quantidade = necessidadeTotal - toNumber(estoqueDisponivel) - toNumber(recebendo);
+    const estoqueProjetado = toNumber(estoqueDisponivel) + toNumber(recebimentoPendente || recebendo || 0);
+    const quantidade = necessidadeTotal - estoqueProjetado;
     return Math.max(0, Math.ceil(quantidade));
   }
 
@@ -65,7 +81,7 @@
     if (typeof coberturaDiasOrItem === 'object' && coberturaDiasOrItem !== null) {
       const item = coberturaDiasOrItem;
       consumo = toNumber(item.consumo_medio_mensal || item.consumoMensal || item.consumo_mensal || 0);
-      estoque = toNumber(item.estoque_atual || item.estoqueDisponivel || item.estoque || 0);
+      estoque = toNumber(item.estoque_atual || item.estoqueDisponivel || item.estoque || 0) + toNumber(item.recebimento_pendente || item.recebendo || 0);
       coberturaDias = calcularCoberturaDias(estoque, calcularConsumoDiario(consumo));
     }
 
@@ -153,10 +169,12 @@
     const consumoDiario = calcularConsumoDiario(consumoMensal);
     const estoqueDisponivel = toNumber(item.estoque_atual || item.disponivel || 0);
     const recebendo = toNumber(item.recebendo || 0);
+    const recebimentoPendente = toNumber(item.recebimento_pendente || 0);
     const necessidadeTotal = calcularNecessidadeTotal(consumoDiario);
-    const quantidadeSugerida = calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo);
-    const coberturaDias = calcularCoberturaDias(estoqueDisponivel, consumoDiario);
-    const statusCompra = calcularStatusCompra({ consumo_medio_mensal: consumoMensal, estoque_atual: estoqueDisponivel });
+    const quantidadeSugerida = calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo, recebimentoPendente);
+    const estoqueProjetado = estoqueDisponivel + recebimentoPendente;
+    const coberturaDias = calcularCoberturaDias(estoqueProjetado, consumoDiario);
+    const statusCompra = calcularStatusCompra({ consumo_medio_mensal: consumoMensal, estoque_atual: estoqueDisponivel, recebimento_pendente: recebimentoPendente });
 
     return {
       codigo: item.codigo || '',
@@ -167,6 +185,8 @@
       consumo_medio_mensal: consumoMensal,
       saldo_inicial: toNumber(item.saldo_inicial || 0),
       recebendo: recebendo,
+      recebimento_pendente: recebimentoPendente,
+      estoque_projetado: estoqueProjetado,
       avariado: toNumber(item.avariado || 0),
       saldo_final: toNumber(item.saldo_final || 0),
       fornecedor_id: item.fornecedor_id || null,
@@ -188,10 +208,12 @@
     const consumoDiario = calcularConsumoDiario(produto.consumo_medio_mensal || 0);
     const estoqueDisponivel = toNumber(produto.estoque_atual || 0);
     const recebendo = toNumber(produto.recebendo || 0);
-    const coberturaDias = calcularCoberturaDias(estoqueDisponivel, consumoDiario);
+    const recebimentoPendente = toNumber(produto.recebimento_pendente || 0);
+    const estoqueProjetado = estoqueDisponivel + recebimentoPendente;
+    const coberturaDias = calcularCoberturaDias(estoqueProjetado, consumoDiario);
     const pontoPedido = calcularPontoPedido(consumoDiario);
     const necessidadeTotal = calcularNecessidadeTotal(consumoDiario);
-    const quantidadeSugerida = calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo);
+    const quantidadeSugerida = calcularQuantidadeSugerida(consumoDiario, estoqueDisponivel, recebendo, recebimentoPendente);
     return {
       consumoDiario,
       estoqueSeguranca: calcularEstoqueSeguranca(consumoDiario),
@@ -199,7 +221,8 @@
       pontoPedido,
       necessidadeTotal,
       quantidadeSugerida,
-      statusCompra: calcularStatusCompra({ consumo_medio_mensal: produto.consumo_medio_mensal || 0, estoque_atual: estoqueDisponivel }),
+      estoqueProjetado,
+      statusCompra: calcularStatusCompra({ consumo_medio_mensal: produto.consumo_medio_mensal || 0, estoque_atual: estoqueDisponivel, recebimento_pendente: recebimentoPendente }),
     };
   }
 
@@ -214,6 +237,7 @@
     calcularNecessidade7Dias,
     calcularNecessidadeLeadTime,
     calcularNecessidadeTotal,
+    calcularRecebimentoPendente,
     calcularQuantidadeSugerida,
     calcularStatusCompra,
     calcularStatusBadge,
