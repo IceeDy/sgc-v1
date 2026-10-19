@@ -706,6 +706,7 @@ async function clearAllStores() {
 function norm(s) { if (s == null) return ''; return String(s).replace(/[\u00A0\u2007\u202F\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function up(s) { return norm(s).toUpperCase(); }
 function escapeHtmlAttr(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 /* [CORRELACOES-DEFAULT] Sementes padrão iniciais (usadas apenas na 1ª execução ou via botão "Restaurar padrão"). */
 const CORRELACOES_FIXAS = [
@@ -2827,7 +2828,7 @@ function setupUI() {
       <div class="cards"><div class="card"><div class="label">OK</div><div class="value">${ok}</div></div><div class="card"><div class="label">Divergentes</div><div class="value">${div}</div></div></div>
       <div style="overflow:auto;max-height:50vh"><table>
         <thead><tr><th>Produto</th><th>Excel Saldo</th><th>HTML Saldo</th><th>Excel Cob.</th><th>HTML Cob.</th><th>Excel Status</th><th>HTML Status</th><th>Excel Sug.</th><th>HTML Sug.</th></tr></thead>
-        <tbody>${detalhes.slice(0,200).map(d=>`<tr><td>${d.produto}</td><td>${d.excel.saldo}</td><td>${d.html.saldo}</td><td>${d.excel.dias_cobertura}</td><td>${d.html.dias}</td><td>${d.excel.status}</td><td>${d.html.status}</td><td>${d.excel.sugestao}</td><td>${d.html.sug}</td></tr>`).join('')}</tbody>
+        <tbody>${detalhes.slice(0,200).map(d=>`<tr><td>${escapeHtml(d.produto)}</td><td>${escapeHtml(d.excel.saldo)}</td><td>${escapeHtml(d.html.saldo)}</td><td>${escapeHtml(d.excel.dias_cobertura)}</td><td>${escapeHtml(d.html.dias)}</td><td>${escapeHtml(d.excel.status)}</td><td>${escapeHtml(d.html.status)}</td><td>${escapeHtml(d.excel.sugestao)}</td><td>${escapeHtml(d.html.sug)}</td></tr>`).join('')}</tbody>
       </table></div>`;
   });
   setupEnterNavigation();
