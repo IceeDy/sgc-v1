@@ -291,6 +291,7 @@ th.col-sel { z-index:25; background:#f8fafc; }
       <a data-page="relatorio">Relatório de Compras</a>
       <a data-page="cotacao">Cotação</a>
       <a data-page="pedidos_forn">Pedidos Fornecedores</a>
+      <a data-page="resumo_exec">Resumo Executivo</a>
       <a data-page="pedidos">Pedidos de Clientes</a>
       <a data-page="risco">Risco de Ruptura</a>
       <a data-page="correlacoes">Correlações</a>
@@ -409,6 +410,38 @@ th.col-sel { z-index:25; background:#f8fafc; }
         <button id="btnPfornLimparAjustes" class="secondary" type="button">Marcar entregues como faturados</button>
       </div>
       <div id="pfornList"></div>
+    </section>
+
+    <section id="resumo_exec" class="page">
+      <div class="toolbar" style="background:#fff;border:1px solid var(--border);border-radius:10px;padding:.75rem 1rem;">
+        <label for="resumoDataIni" style="font-size:.82rem;color:var(--muted);font-weight:600">Data inicial</label>
+        <input type="date" id="resumoDataIni">
+        <label for="resumoDataFim" style="font-size:.82rem;color:var(--muted);font-weight:600">Data final</label>
+        <input type="date" id="resumoDataFim">
+        <button id="btnResumoFiltrar" type="button">Atualizar resumo</button>
+        <button id="btnResumoLimpar" class="secondary" type="button">Todo o período</button>
+        <span class="sep" style="width:1px;height:22px;background:var(--border);margin:0 .25rem"></span>
+        <button id="btnResumoXlsx" type="button">Exportar Excel</button>
+        <button id="btnResumoPdf" class="secondary" type="button">Exportar PDF</button>
+      </div>
+      <p class="small" id="resumoPeriodoLabel" style="margin:.25rem 0 1rem">Período: todos os pedidos registrados</p>
+      <div class="cards" id="resumoExecCards"></div>
+      <div class="chart-grid">
+        <div class="chart-box" style="height:auto;min-height:260px">
+          <h3 style="font-size:1rem;margin-bottom:.75rem">Pedidos por status</h3>
+          <div style="overflow:auto"><table id="resumoStatusTable"></table></div>
+        </div>
+        <div class="chart-box" style="height:auto;min-height:260px">
+          <h3 style="font-size:1rem;margin-bottom:.75rem">10 maiores fornecedores</h3>
+          <div style="overflow:auto"><table id="resumoFornecedorTable"></table></div>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:1rem">
+        <h3 style="font-size:1rem;margin-bottom:.5rem">Qualidade dos dados</h3>
+        <p class="small" id="resumoQualidade">Os alertas serão calculados a partir dos itens dos pedidos selecionados. O relatório não altera os dados de origem.</p>
+        <div style="overflow:auto;margin-top:.75rem"><table id="resumoAlertasTable"></table></div>
+      </div>
+      <p class="small">Critério: valores ativos excluem pedidos cancelados. Os totais são os valores registrados no SGC; alertas de quantidade/preço/total são indicativos e devem ser conferidos com a nota fiscal ou cotação.</p>
     </section>
 
     <section id="pedidos" class="page">
@@ -1461,7 +1494,7 @@ let state = {
   lastFilters: { produtos: { q:'', status:'' }, relatorio: { status:'COMPRAR,ATENÇÃO,SEMSTATUS' }, pedidos: {} },
   corrFilters: { q:'', grupo:'', marca:'' }
 };
-const pageTitles = { dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
+const pageTitles = { dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', resumo_exec:'Resumo Executivo', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -1469,6 +1502,7 @@ function showPage(id) {
   document.getElementById('pageTitle').textContent = pageTitles[id] || id;
   if (id === 'cotacao') renderCotacao();
   if (id === 'pedidos_forn') renderPedidosFornecedor();
+  if (id === 'resumo_exec') renderResumoExecutivo();
   if (id === 'relatorio') renderRelatorio(state.lastFilters.relatorio.status);
   if (id === 'correlacoes') renderCorrelacoes();
 }
@@ -2151,6 +2185,169 @@ function calcAjustesEstoque() {
 }
 // [NO-RECALC-ENTREGUE] Não há mais ajustes de pedidos entregues a contabilizar.
 function countPedidosEntreguesAplicados() { return 0; }
+function resumoExecutivoDados() {
+  const ini = document.getElementById('resumoDataIni')?.value || '';
+  const fim = document.getElementById('resumoDataFim')?.value || '';
+  const todos = (state.pedidosFornecedor || []).filter(p => {
+    const data = String(p.data_criacao || '').slice(0, 10);
+    if (ini && (!data || data < ini)) return false;
+    if (fim && (!data || data > fim)) return false;
+    return true;
+  });
+  const valorPedido = p => {
+    const totalItens = (p.itens || []).reduce((sum, it) => sum + (Number(it.total) || 0), 0);
+    return Number.isFinite(Number(p.total)) && p.total !== null && p.total !== '' ? Number(p.total) : totalItens;
+  };
+  const statusCanon = p => {
+    const raw = norm(p.status || 'SEM STATUS').toUpperCase();
+    return ['PENDENTE','FATURADO','ENTREGUE','CANCELADO'].includes(raw) ? raw : raw;
+  };
+  const valorTotal = todos.reduce((sum, p) => sum + valorPedido(p), 0);
+  const valorAtivo = todos.filter(p => statusCanon(p) !== 'CANCELADO').reduce((sum, p) => sum + valorPedido(p), 0);
+  const ativos = todos.filter(p => statusCanon(p) !== 'CANCELADO');
+  const fornecedores = new Map();
+  todos.forEach(p => {
+    const nome = norm(p.fornecedor_nome || 'Fornecedor não informado');
+    const atual = fornecedores.get(nome) || { fornecedor:nome, pedidos:0, itens:0, total:0, ativo:0 };
+    atual.pedidos++;
+    atual.itens += (p.itens || []).length;
+    atual.total += valorPedido(p);
+    if (statusCanon(p) !== 'CANCELADO') atual.ativo += valorPedido(p);
+    fornecedores.set(nome, atual);
+  });
+  const statusMap = new Map();
+  todos.forEach(p => {
+    const status = statusCanon(p);
+    const atual = statusMap.get(status) || { status, pedidos:0, total:0, ativo:0 };
+    atual.pedidos++;
+    atual.total += valorPedido(p);
+    if (status !== 'CANCELADO') atual.ativo += valorPedido(p);
+    statusMap.set(status, atual);
+  });
+  const alertas = [];
+  todos.forEach(p => (p.itens || []).forEach(it => {
+    const qtd = Number(it.quantidade);
+    const preco = Number(it.preco);
+    const total = Number(it.total);
+    const esperado = qtd * preco;
+    let motivo = '';
+    if (!Number.isFinite(qtd) || qtd <= 0) motivo = 'Quantidade ausente ou não positiva';
+    else if (!Number.isFinite(preco) || preco < 0) motivo = 'Preço unitário ausente ou inválido';
+    else if (!Number.isFinite(total) || total < 0) motivo = 'Total do item ausente ou inválido';
+    else if (Math.abs(esperado - total) > Math.max(0.05, Math.abs(total) * 0.005)) motivo = 'Quantidade × preço difere do total';
+    if (motivo) alertas.push({ pedido:p.id || '', fornecedor:p.fornecedor_nome || '—', produto:it.produto || it.codigo || 'Item sem descrição', motivo, quantidade:Number.isFinite(qtd)?qtd:'', preco:Number.isFinite(preco)?preco:'', total:Number.isFinite(total)?total:'' });
+  }));
+  const itens = todos.reduce((sum,p)=>sum+(p.itens||[]).length,0);
+  const fmt = n => Number(n || 0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+  const pct = (a,b) => b ? (a/b*100).toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})+'%' : '—';
+  return { ini, fim, todos, ativos, itens, valorTotal, valorAtivo, fornecedores:[...fornecedores.values()].sort((a,b)=>b.ativo-a.ativo), status:[...statusMap.values()].sort((a,b)=>b.total-a.total), alertas, valorPedido, fmt, pct };
+}
+function renderResumoExecutivo() {
+  const d = resumoExecutivoDados();
+  const fmtQtdLocal = n => Number(n || 0).toLocaleString('pt-BR');
+  const periodo = d.ini || d.fim ? `Período: ${d.ini ? new Date(d.ini+'T12:00:00').toLocaleDateString('pt-BR') : 'início'} até ${d.fim ? new Date(d.fim+'T12:00:00').toLocaleDateString('pt-BR') : 'hoje'}` : 'Período: todos os pedidos registrados';
+  document.getElementById('resumoPeriodoLabel').textContent = periodo + ' · Gerado em ' + new Date().toLocaleString('pt-BR');
+  const pend = d.todos.filter(p=>norm(p.status).toUpperCase()==='PENDENTE');
+  const fat = d.todos.filter(p=>norm(p.status).toUpperCase()==='FATURADO');
+  const ent = d.todos.filter(p=>norm(p.status).toUpperCase()==='ENTREGUE');
+  const canc = d.todos.filter(p=>norm(p.status).toUpperCase()==='CANCELADO');
+  const valorStatus = arr => arr.reduce((sum,p)=>sum+d.valorPedido(p),0);
+  const cards = [
+    ['Pedidos no período',fmtQtdLocal(d.todos.length)],
+    ['Valor registrado',d.fmt(d.valorTotal)],
+    ['Valor ativo (sem cancelados)',d.fmt(d.valorAtivo)],
+    ['Pendentes',fmtQtdLocal(pend.length)+' · '+d.fmt(valorStatus(pend))],
+    ['Faturados',fmtQtdLocal(fat.length)+' · '+d.fmt(valorStatus(fat))],
+    ['Entregues',fmtQtdLocal(ent.length)+' · '+d.fmt(valorStatus(ent))],
+    ['Cancelados',fmtQtdLocal(canc.length)+' · '+d.fmt(valorStatus(canc))],
+    ['Itens nos pedidos',fmtQtdLocal(d.itens)]
+  ];
+  document.getElementById('resumoExecCards').innerHTML = cards.map(([label,value])=>`<div class="card"><div class="label">${escapeHtmlAttr(label)}</div><div class="value small">${escapeHtmlAttr(value)}</div></div>`).join('');
+  const statusTable = document.getElementById('resumoStatusTable');
+  statusTable.innerHTML = '<thead><tr><th>Status</th><th>Pedidos</th><th>Valor registrado</th><th>% do valor</th></tr></thead><tbody>' +
+    (d.status.length ? d.status.map(x=>`<tr><td>${escapeHtmlAttr(x.status)}</td><td>${x.pedidos}</td><td>${d.fmt(x.total)}</td><td>${d.pct(x.total,d.valorTotal)}</td></tr>`).join('') : '<tr><td colspan="4">Nenhum pedido no período selecionado.</td></tr>') + '</tbody>';
+  const top = d.fornecedores.slice(0,10);
+  document.getElementById('resumoFornecedorTable').innerHTML = '<thead><tr><th>Fornecedor</th><th>Pedidos</th><th>Itens</th><th>Valor ativo</th></tr></thead><tbody>' +
+    (top.length ? top.map(x=>`<tr><td>${escapeHtmlAttr(x.fornecedor)}</td><td>${x.pedidos}</td><td>${x.itens}</td><td>${d.fmt(x.ativo)}</td></tr>`).join('') : '<tr><td colspan="4">Nenhum fornecedor no período selecionado.</td></tr>') + '</tbody>';
+  const alertTable = document.getElementById('resumoAlertasTable');
+  alertTable.innerHTML = '<thead><tr><th>Pedido</th><th>Fornecedor</th><th>Produto</th><th>Problema</th><th>Qtde.</th><th>Preço unit.</th><th>Total</th></tr></thead><tbody>' +
+    (d.alertas.length ? d.alertas.slice(0,100).map(x=>`<tr><td>${escapeHtmlAttr(x.pedido)}</td><td>${escapeHtmlAttr(x.fornecedor)}</td><td>${escapeHtmlAttr(x.produto)}</td><td>${escapeHtmlAttr(x.motivo)}</td><td>${x.quantidade === '' ? '—' : fmtQtdLocal(x.quantidade)}</td><td>${x.preco === '' ? '—' : d.fmt(x.preco)}</td><td>${x.total === '' ? '—' : d.fmt(x.total)}</td></tr>`).join('') : '<tr><td colspan="7">Nenhuma inconsistência matemática básica identificada nos itens do período.</td></tr>') + '</tbody>';
+  document.getElementById('resumoQualidade').textContent = d.alertas.length ? `${d.alertas.length} item(ns) sinalizado(s). Exibindo até 100. Confira os documentos de origem; o sistema não altera os dados automaticamente.` : 'Nenhuma inconsistência matemática básica identificada nos itens do período. Isso não substitui a conferência fiscal/documental.';
+}
+function exportResumoExecutivoXlsx() {
+  const d = resumoExecutivoDados();
+  if (!d.todos.length) { toast('Não há pedidos no período para exportar.', 4000, true); return; }
+  const money = n => Number(n || 0);
+  const wb = XLSX.utils.book_new();
+  const resumo = [
+    ['RESUMO EXECUTIVO DE COMPRAS'],
+    ['Período', d.ini || 'Sem início', d.fim || 'Sem fim'],
+    ['Gerado em', new Date().toLocaleString('pt-BR')],
+    [],
+    ['Indicador','Valor'],
+    ['Pedidos',d.todos.length],
+    ['Itens nos pedidos',d.itens],
+    ['Valor registrado (inclui cancelados)',money(d.valorTotal)],
+    ['Valor ativo (exclui cancelados)',money(d.valorAtivo)],
+    ['Alertas de dados',d.alertas.length]
+  ];
+  const wsResumo = XLSX.utils.aoa_to_sheet(resumo);
+  wsResumo['!cols'] = [{wch:38},{wch:22},{wch:22}];
+  XLSX.utils.book_append_sheet(wb,wsResumo,'Resumo');
+  const wsStatus = XLSX.utils.json_to_sheet(d.status.map(x=>({Status:x.status,Pedidos:x.pedidos,'Valor registrado':money(x.total),'Valor ativo':money(x.ativo),'Percentual do valor':d.valorTotal ? x.total/d.valorTotal : 0})));
+  wsStatus['!cols'] = [{wch:18},{wch:12},{wch:22},{wch:20},{wch:22}];
+  XLSX.utils.book_append_sheet(wb,wsStatus,'Por Status');
+  const wsForn = XLSX.utils.json_to_sheet(d.fornecedores.map(x=>({Fornecedor:x.fornecedor,Pedidos:x.pedidos,Itens:x.itens,'Valor registrado':money(x.total),'Valor ativo':money(x.ativo)})));
+  wsForn['!cols'] = [{wch:36},{wch:12},{wch:12},{wch:22},{wch:20}];
+  XLSX.utils.book_append_sheet(wb,wsForn,'Fornecedores');
+  const detalhamento = [];
+  d.todos.forEach(p=>(p.itens||[]).forEach(it=>detalhamento.push({
+    Pedido:p.id || '',Fornecedor:p.fornecedor_nome || '',Status:p.status || '',
+    'Data criação':p.data_criacao ? String(p.data_criacao).slice(0,10) : '',
+    'Data faturamento':p.data_faturamento || '', 'Data entrega':p.data_entrega || '',
+    Código:it.codigo || '',Produto:it.produto || '',Marca:it.marca || '',
+    Quantidade:Number(it.quantidade)||0,'Preço unitário':Number(it.preco)||0,Total:Number(it.total)||0,
+    Observação:p.observacao || ''
+  })));
+  const wsDetalhe = XLSX.utils.json_to_sheet(detalhamento);
+  wsDetalhe['!cols'] = [{wch:28},{wch:28},{wch:14},{wch:14},{wch:16},{wch:14},{wch:14},{wch:42},{wch:22},{wch:12},{wch:18},{wch:18},{wch:36}];
+  XLSX.utils.book_append_sheet(wb,wsDetalhe,'Detalhamento');
+  const wsAlertas = XLSX.utils.json_to_sheet(d.alertas.map(x=>({'Pedido':x.pedido,Fornecedor:x.fornecedor,Produto:x.produto,Problema:x.motivo,Quantidade:x.quantidade, 'Preço unitário':x.preco,Total:x.total})));
+  XLSX.utils.book_append_sheet(wb,wsAlertas,'Alertas');
+  XLSX.writeFile(wb,`resumo_executivo_compras_${new Date().toISOString().slice(0,10)}.xlsx`);
+  toast('Resumo executivo exportado para Excel (5 abas).');
+}
+function exportResumoExecutivoPdf() {
+  const d = resumoExecutivoDados();
+  if (!d.todos.length) { toast('Não há pedidos no período para exportar.', 4000, true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+  const fmt = n => Number(n || 0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+  const periodo = d.ini || d.fim ? `${d.ini || 'início'} a ${d.fim || 'hoje'}` : 'Todos os pedidos registrados';
+  doc.setFontSize(18); doc.text('Resumo Executivo de Compras',14,16);
+  doc.setFontSize(9); doc.text(`Período: ${periodo} | Gerado em: ${new Date().toLocaleString('pt-BR')}`,14,23);
+  doc.autoTable({startY:29,head:[['Indicador','Resultado']],body:[
+    ['Pedidos',String(d.todos.length)],['Itens nos pedidos',String(d.itens)],
+    ['Valor registrado (inclui cancelados)',fmt(d.valorTotal)],['Valor ativo (exclui cancelados)',fmt(d.valorAtivo)],
+    ['Alertas de dados',String(d.alertas.length)]
+  ],theme:'grid',styles:{fontSize:9,cellPadding:2},headStyles:{fillColor:[37,99,235]}});
+  let y = doc.lastAutoTable.finalY + 8;
+  doc.setFontSize(12); doc.text('Pedidos por status',14,y);
+  doc.autoTable({startY:y+3,head:[['Status','Pedidos','Valor registrado','Valor ativo','% do valor']],body:d.status.map(x=>[x.status,String(x.pedidos),fmt(x.total),fmt(x.ativo),d.pct(x.total,d.valorTotal)]),theme:'grid',styles:{fontSize:8,cellPadding:2},headStyles:{fillColor:[37,99,235]}});
+  y = doc.lastAutoTable.finalY + 8;
+  if (y > 175) { doc.addPage(); y = 18; }
+  doc.setFontSize(12); doc.text('10 maiores fornecedores por valor ativo',14,y);
+  doc.autoTable({startY:y+3,head:[['Fornecedor','Pedidos','Itens','Valor registrado','Valor ativo']],body:d.fornecedores.slice(0,10).map(x=>[x.fornecedor,String(x.pedidos),String(x.itens),fmt(x.total),fmt(x.ativo)]),theme:'grid',styles:{fontSize:8,cellPadding:2},headStyles:{fillColor:[37,99,235]}});
+  if (d.alertas.length) {
+    doc.addPage();
+    doc.setFontSize(14); doc.text('Alertas de qualidade dos dados',14,16);
+    doc.autoTable({startY:22,head:[['Fornecedor','Produto','Problema','Qtde.','Preço unit.','Total']],body:d.alertas.slice(0,150).map(x=>[x.fornecedor,x.produto,x.motivo,String(x.quantidade),x.preco===''?'—':fmt(x.preco),x.total===''?'—':fmt(x.total)]),theme:'grid',styles:{fontSize:7,cellPadding:1.5},headStyles:{fillColor:[217,119,6]}});
+  }
+  const pages = doc.internal.getNumberOfPages();
+  for (let i=1;i<=pages;i++) { doc.setPage(i); doc.setFontSize(8); doc.text(`SGC · Resumo executivo | Página ${i} de ${pages}`,doc.internal.pageSize.getWidth()-14,doc.internal.pageSize.getHeight()-6,{align:'right'}); }
+  doc.save(`resumo_executivo_compras_${new Date().toISOString().slice(0,10)}.pdf`);
+  toast('Resumo executivo exportado para PDF.');
+}
 function renderPedidosFornecedor() {
   const cards = document.getElementById('pfornCards');
   const lista = state.pedidosFornecedor || [];
@@ -2415,6 +2612,7 @@ function renderAll() {
   if (document.getElementById('correlacoes').classList.contains('active')) renderCorrelacoes();
   if (document.getElementById('cotacao').classList.contains('active')) renderCotacao();
   if (document.getElementById('pedidos_forn').classList.contains('active')) renderPedidosFornecedor();
+  if (document.getElementById('resumo_exec').classList.contains('active')) renderResumoExecutivo();
 }
 function colToExportValue(col, row) {
   const v = col.getValue(row);
@@ -2790,6 +2988,14 @@ function setupUI() {
   document.getElementById('solicClose').addEventListener('click', fecharModalSolicitacao);
   document.getElementById('solicModal').addEventListener('mousedown', e => { if (e.target.id === 'solicModal') fecharModalSolicitacao(); });
   document.getElementById('solicExportAllCSV').addEventListener('click', exportarSolicitacaoTodosCSV);
+  document.getElementById('btnResumoFiltrar').addEventListener('click', renderResumoExecutivo);
+  document.getElementById('btnResumoLimpar').addEventListener('click', () => {
+    document.getElementById('resumoDataIni').value = '';
+    document.getElementById('resumoDataFim').value = '';
+    renderResumoExecutivo();
+  });
+  document.getElementById('btnResumoXlsx').addEventListener('click', exportResumoExecutivoXlsx);
+  document.getElementById('btnResumoPdf').addEventListener('click', exportResumoExecutivoPdf);
   document.getElementById('pfornSearch').addEventListener('input', () => renderPedidosFornecedor());
   document.getElementById('pfornStatusFilter').addEventListener('change', () => renderPedidosFornecedor());
   document.getElementById('btnPfornRecalc').addEventListener('click', async () => { await recalcularComAjustes(); toast('Recalculado.'); });
