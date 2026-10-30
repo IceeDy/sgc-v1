@@ -310,6 +310,9 @@ th.col-sel { z-index:25; background:#f8fafc; }
         <button id="btnExportCSV" class="secondary">CSV</button>
         <button id="btnExportXLSX" class="secondary">XLSX</button>
         <button id="btnExportPDF" class="secondary">PDF</button>
+        <button id="btnBackupJSON" class="secondary" type="button">Backup completo</button>
+        <label class="secondary" for="fileRestoreJSON" style="display:inline-flex;align-items:center;padding:.5rem .75rem;border-radius:8px;cursor:pointer">Restaurar backup</label>
+        <input type="file" id="fileRestoreJSON" accept=".json,application/json" hidden>
       </div>
     </header>
 
@@ -629,7 +632,7 @@ function toast(msg, ms = 3000, isErr = false, isWarn = false) {
   el._t = setTimeout(() => el.classList.remove('show'), ms);
 }
 const DB_NAME = 'analise_compras_db';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 let db;
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -646,6 +649,7 @@ function openDB() {
       if (!d.objectStoreNames.contains('fornecedores')) d.createObjectStore('fornecedores', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('cotacoes')) d.createObjectStore('cotacoes', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('pedidos_fornecedor')) d.createObjectStore('pedidos_fornecedor', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('historico_precos')) d.createObjectStore('historico_precos', { keyPath: 'id' });
     };
     req.onsuccess = e => { db = e.target.result; resolve(db); };
     req.onerror = e => reject(e.target.error);
@@ -1451,7 +1455,7 @@ async function loadColumnPrefs() {
 const FORNECEDORES_PADRAO = ['P.SEVERINI','SDB','DESTRO','ESPERANÇA','TOP SERVICE/RENOVA','MASTERMIX','COMPRE FACIL','ROMMAC','TENDA','ZARAGOZA','FR','SP SUL'];
 let state = {
   produtos: [], pedidos: [], correlacoes: [], correlacoesItens: [], importacoes: [],
-  fornecedores: [], pedidosFornecedor: [],
+  fornecedores: [], pedidosFornecedor: [], historicoPrecos: [],
   cotacao: { id:'atual', data: new Date().toISOString().slice(0,10), itens: {}, itensManuais: {}, mostrarTodos: true, excluidos: [] },
   selecaoRelatorio: new Set(),
   filtroNegativosProd: false, filtroNegativosRel: false,
@@ -1785,11 +1789,25 @@ function getProdutoById(id) {
 }
 function getProdutosDisponiveisParaCotacao() { return state.produtos.filter(p => p.status === 'COMPRAR' || p.status === 'ATENÇÃO'); }
 function getExcluidos() { return Array.isArray(state.cotacao.excluidos) ? state.cotacao.excluidos : []; }
+function getHistoricoPrecoProduto(produtoId) {
+  const historico = (state.historicoPrecos || []).filter(h => String(h.produto_id) === String(produtoId) && Number(h.preco) > 0);
+  const compras = historico.filter(h => h.tipo === 'COMPRA').sort((a,b) => String(b.data || '').localeCompare(String(a.data || '')) || String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+  const cotacoes = historico.filter(h => h.tipo === 'COTACAO').sort((a,b) => String(b.data || '').localeCompare(String(a.data || '')) || String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+  return compras[0] || cotacoes[0] || null;
+}
+function getReferenciaPrecoProduto(produtoId) { return getHistoricoPrecoProduto(produtoId); }
 function ensureCotacaoItem(produtoId) {
   if (!state.cotacao.itens[produtoId]) {
     const prod = getProdutoById(produtoId);
     const qtdSugerida = prod ? Math.max(1, Math.round(prod.sugestao || 0)) : 1;
-    state.cotacao.itens[produtoId] = { quantidade: qtdSugerida, ultimo_preco: 0, precos: {}, incluir: true };
+    const refPreco = getReferenciaPrecoProduto(produtoId);
+    state.cotacao.itens[produtoId] = { quantidade: qtdSugerida, ultimo_preco: refPreco ? Number(refPreco.preco) : 0, referencia_preco: refPreco ? refPreco.tipo : null, precos: {}, incluir: true };
+  } else {
+    const item = state.cotacao.itens[produtoId];
+    if (!(Number(item.ultimo_preco) > 0)) {
+      const refPreco = getReferenciaPrecoProduto(produtoId);
+      if (refPreco) { item.ultimo_preco = Number(refPreco.preco); item.referencia_preco = refPreco.tipo; }
+    }
   }
   return state.cotacao.itens[produtoId];
 }
@@ -2198,12 +2216,12 @@ function renderPedidosFornecedor() {
   }).join('');
   list.querySelectorAll('.ped-card-header').forEach(h => { h.addEventListener('click', () => { h.closest('.ped-card').classList.toggle('open'); }); });
   // [NO-RECALC-ENTREGUE] Marcar como ENTREGUE apenas grava o status/data. Não recalcula nem aplica ajuste de estoque.
-  list.querySelectorAll('.ped-status-select').forEach(sel => { sel.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === sel.dataset.pedId); if (!ped) return; ped.status = sel.value; if (ped.status === 'FATURADO' && !ped.data_faturamento) ped.data_faturamento = new Date().toISOString().slice(0,10); if (ped.status === 'ENTREGUE' && !ped.data_entrega) ped.data_entrega = new Date().toISOString().slice(0,10); await putOne('pedidos_fornecedor', ped); renderPedidosFornecedor(); toast(`Pedido marcado como ${ped.status}.`); }); });
-  list.querySelectorAll('.ped-data-fat').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_faturamento = inp.value || null; await putOne('pedidos_fornecedor', ped); }); });
+  list.querySelectorAll('.ped-status-select').forEach(sel => { sel.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === sel.dataset.pedId); if (!ped) return; ped.status = sel.value; if (ped.status === 'FATURADO' && !ped.data_faturamento) ped.data_faturamento = new Date().toISOString().slice(0,10); if (ped.status === 'ENTREGUE' && !ped.data_entrega) ped.data_entrega = new Date().toISOString().slice(0,10); await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); renderPedidosFornecedor(); toast(`Pedido marcado como ${ped.status}.`); }); });
+  list.querySelectorAll('.ped-data-fat').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_faturamento = inp.value || null; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); }); });
   // [NO-RECALC-ENTREGUE] Alterar data de entrega apenas persiste o valor, sem recalcular saldos.
-  list.querySelectorAll('.ped-data-ent').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_entrega = inp.value || null; await putOne('pedidos_fornecedor', ped); }); });
+  list.querySelectorAll('.ped-data-ent').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_entrega = inp.value || null; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); }); });
   list.querySelectorAll('.ped-obs').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.observacao = inp.value; await putOne('pedidos_fornecedor', ped); }); });
-  list.querySelectorAll('.ped-excluir').forEach(btn => { btn.addEventListener('click', async e => { e.stopPropagation(); const ped = state.pedidosFornecedor.find(p => p.id === btn.dataset.pedId); if (!ped) return; if (!confirm(`Excluir pedido de "${ped.fornecedor_nome}"?`)) return; await delOne('pedidos_fornecedor', ped.id); state.pedidosFornecedor = state.pedidosFornecedor.filter(p => p.id !== ped.id); renderPedidosFornecedor(); toast('Pedido excluído.'); }); });
+  list.querySelectorAll('.ped-excluir').forEach(btn => { btn.addEventListener('click', async e => { e.stopPropagation(); const ped = state.pedidosFornecedor.find(p => p.id === btn.dataset.pedId); if (!ped) return; if (!confirm(`Excluir pedido de "${ped.fornecedor_nome}"?`)) return; await delOne('pedidos_fornecedor', ped.id); await registrarCompraConfirmada({ ...ped, status: 'CANCELADO' }); state.pedidosFornecedor = state.pedidosFornecedor.filter(p => p.id !== ped.id); renderPedidosFornecedor(); toast('Pedido excluído.'); }); });
 }
 async function recalcularComAjustes() {
   const estoques = await getAll('estoques');
@@ -2215,7 +2233,7 @@ async function recalcularComAjustes() {
 async function zerarAjustes() {
   if (!confirm('Marcar todos os pedidos entregues como FATURADO?')) return;
   let n = 0;
-  for (const ped of state.pedidosFornecedor) { if (ped.status === 'ENTREGUE') { ped.status = 'FATURADO'; await putOne('pedidos_fornecedor', ped); n++; } }
+  for (const ped of state.pedidosFornecedor) { if (ped.status === 'ENTREGUE') { ped.status = 'FATURADO'; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); n++; } }
   renderPedidosFornecedor(); toast(`${n} pedido(s) revertido(s) para Faturado.`);
 }
 let solicCtx = { ativos: [], produtos: [], activeId: null };
@@ -2345,7 +2363,21 @@ document.getElementById('fornApply').addEventListener('click', async () => {
   await putAll('fornecedores', limpos); state.fornecedores = limpos;
   fecharModalFornecedores(); renderCotacao(); toast('Fornecedores atualizados.');
 });
-async function salvarCotacao() { state.cotacao.data = document.getElementById('cotData').value || new Date().toISOString().slice(0,10); await putOne('cotacoes', state.cotacao); toast('Cotação salva.'); }
+async function salvarCotacao() {
+  state.cotacao.data = document.getElementById('cotData').value || new Date().toISOString().slice(0,10);
+  const agora = new Date().toISOString();
+  for (const [produtoId, item] of Object.entries(state.cotacao.itens || {})) {
+    const prod = getProdutoById(produtoId); if (!prod) continue;
+    for (const [fornecedorId, raw] of Object.entries(item.precos || {})) {
+      const preco = Number(raw); if (!(preco > 0)) continue;
+      const forn = state.fornecedores.find(f => f.id === fornecedorId);
+      const registro = { id: `cot_${agora}_${produtoId}_${fornecedorId}_${Math.round(preco*100)}`, produto_id: produtoId, codigo: (prod.codigos || [])[0] || '', produto: prod.produto || '', marca: prod.marca || '', fornecedor_id: fornecedorId, fornecedor_nome: forn ? forn.nome : '', preco, data: state.cotacao.data, criado_em: agora, tipo: 'COTACAO', origem: 'COTACAO_SALVA' };
+      await putOne('historico_precos', registro);
+      state.historicoPrecos.push(registro);
+    }
+  }
+  await putOne('cotacoes', state.cotacao); toast('Cotação salva e histórico de preços atualizado.');
+}
 async function carregarCotacao() {
   const c = await getOne('cotacoes', 'atual');
   if (c && c.itens) { state.cotacao = { id: 'atual', data: c.data || new Date().toISOString().slice(0,10), itens: c.itens || {}, itensManuais: c.itensManuais || {}, mostrarTodos: c.mostrarTodos !== false, excluidos: Array.isArray(c.excluidos) ? c.excluidos : [] }; }
@@ -2369,9 +2401,56 @@ document.getElementById('tabelaRelatorio').addEventListener('change', e => {
   if (e.target.matches('.sel-rel')) { const id = e.target.dataset.id; if (e.target.checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; return; }
   if (e.target.id === 'selAllRel') { const checked = e.target.checked; document.querySelectorAll('#tabelaRelatorio .sel-rel').forEach(cb => { cb.checked = checked; const id = cb.dataset.id; if (checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); }); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; }
 });
+const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos'];
+async function registrarCompraConfirmada(ped) {
+  if (!ped) return;
+  if (!['FATURADO','ENTREGUE'].includes(ped.status)) {
+    const ids = (state.historicoPrecos || []).filter(h => h.pedido_id === ped.id && h.tipo === 'COMPRA').map(h => h.id);
+    for (const id of ids) await delOne('historico_precos', id);
+    state.historicoPrecos = (state.historicoPrecos || []).filter(h => !ids.includes(h.id));
+    return;
+  }
+  const data = ped.status === 'ENTREGUE' ? (ped.data_entrega || ped.data_faturamento || ped.data_criacao) : (ped.data_faturamento || ped.data_entrega || ped.data_criacao);
+  for (const it of (ped.itens || [])) {
+    if (!it.produto_id || it.is_manual || !(Number(it.preco) > 0)) continue;
+    const id = 'compra_' + ped.id + '_' + it.produto_id;
+    const existente = state.historicoPrecos.find(h => h.id === id);
+    const registro = { id, produto_id: it.produto_id, codigo: it.codigo || '', produto: it.produto || '', marca: it.marca || '', fornecedor_id: ped.fornecedor_id || '', fornecedor_nome: ped.fornecedor_nome || '', preco: Number(it.preco), quantidade: Number(it.quantidade) || 0, data: String(data || new Date().toISOString()).slice(0,10), criado_em: ped.data_criacao || new Date().toISOString(), tipo: 'COMPRA', origem: ped.status, pedido_id: ped.id };
+    await putOne('historico_precos', registro);
+    if (existente) state.historicoPrecos = state.historicoPrecos.filter(h => h.id !== id);
+    state.historicoPrecos.push(registro);
+  }
+}
+async function sincronizarHistoricoCompras() {
+  for (const ped of (state.pedidosFornecedor || [])) await registrarCompraConfirmada(ped);
+}
+async function exportarBackupCompleto() {
+  try {
+    const dados = {};
+    for (const store of STORES_BACKUP) dados[store] = await getAll(store);
+    const backup = { app: 'SGC', versao: 1, banco: DB_NAME, versaoBanco: DB_VERSION, exportado_em: new Date().toISOString(), stores: dados };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a');
+    a.href = url; a.download = 'SGC_backup_' + new Date().toISOString().replace(/[:.]/g,'-') + '.json';
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    toast('Backup completo exportado.');
+  } catch (err) { console.error(err); toast('Falha ao gerar backup completo.', 4000, true); }
+}
+async function restaurarBackupCompleto(file) {
+  const backup = JSON.parse(await file.text());
+  if (!backup || backup.app !== 'SGC' || !backup.stores || typeof backup.stores !== 'object') throw new Error('Arquivo não é um backup válido do SGC.');
+  const dados = backup.stores;
+  for (const store of STORES_BACKUP) if (dados[store] != null && !Array.isArray(dados[store])) throw new Error('Estrutura inválida na tabela ' + store + '.');
+  const resumo = STORES_BACKUP.map(store => store + ': ' + ((dados[store] || []).length)).join('\\n');
+  if (!confirm('ATENÇÃO: a restauração substituirá os dados atuais deste navegador. Faça um backup antes de continuar.\\n\\n' + resumo + '\\n\\nDeseja continuar?')) return;
+  for (const store of STORES_BACKUP) await putAll(store, dados[store] || []);
+  await loadStateFromDB(); renderAll(); toast('Backup restaurado com sucesso.');
+}
 async function loadStateFromDB() {
   await openDB();
   state.produtos = await getAll('produtos'); state.pedidos = await getAll('pedidos'); state.importacoes = await getAll('importacoes'); state.pedidosFornecedor = await getAll('pedidos_fornecedor');
+  state.historicoPrecos = await getAll('historico_precos');
+  await sincronizarHistoricoCompras();
   state.correlacoesItens = await getAll('correlacoes');
   if (!Array.isArray(state.correlacoesItens) || state.correlacoesItens.length === 0) {
     state.correlacoesItens = seedCorrelacoesFromFixas();
@@ -2708,6 +2787,8 @@ function setupCorrelacoesUI() {
 }
 function setupUI() {
   document.querySelectorAll('#menu a').forEach(a => a.addEventListener('click', () => showPage(a.dataset.page)));
+  document.getElementById('btnBackupJSON').addEventListener('click', exportarBackupCompleto);
+  document.getElementById('fileRestoreJSON').addEventListener('change', async e => { const file = e.target.files && e.target.files[0]; if (!file) return; try { await restaurarBackupCompleto(file); } catch (err) { console.error(err); alert('Não foi possível restaurar o backup: ' + (err.message || err)); } finally { e.target.value = ''; } });
   document.getElementById('btnImport').addEventListener('click', async () => {
     const file = document.getElementById('fileInput').files[0];
     if (!file) return alert('Selecione um arquivo .xlsx');
