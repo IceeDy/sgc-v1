@@ -2217,11 +2217,11 @@ function renderPedidosFornecedor() {
   list.querySelectorAll('.ped-card-header').forEach(h => { h.addEventListener('click', () => { h.closest('.ped-card').classList.toggle('open'); }); });
   // [NO-RECALC-ENTREGUE] Marcar como ENTREGUE apenas grava o status/data. Não recalcula nem aplica ajuste de estoque.
   list.querySelectorAll('.ped-status-select').forEach(sel => { sel.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === sel.dataset.pedId); if (!ped) return; ped.status = sel.value; if (ped.status === 'FATURADO' && !ped.data_faturamento) ped.data_faturamento = new Date().toISOString().slice(0,10); if (ped.status === 'ENTREGUE' && !ped.data_entrega) ped.data_entrega = new Date().toISOString().slice(0,10); await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); renderPedidosFornecedor(); toast(`Pedido marcado como ${ped.status}.`); }); });
-  list.querySelectorAll('.ped-data-fat').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_faturamento = inp.value || null; await putOne('pedidos_fornecedor', ped); }); });
+  list.querySelectorAll('.ped-data-fat').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_faturamento = inp.value || null; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); }); });
   // [NO-RECALC-ENTREGUE] Alterar data de entrega apenas persiste o valor, sem recalcular saldos.
-  list.querySelectorAll('.ped-data-ent').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_entrega = inp.value || null; await putOne('pedidos_fornecedor', ped); }); });
+  list.querySelectorAll('.ped-data-ent').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.data_entrega = inp.value || null; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); }); });
   list.querySelectorAll('.ped-obs').forEach(inp => { inp.addEventListener('change', async () => { const ped = state.pedidosFornecedor.find(p => p.id === inp.dataset.pedId); if (!ped) return; ped.observacao = inp.value; await putOne('pedidos_fornecedor', ped); }); });
-  list.querySelectorAll('.ped-excluir').forEach(btn => { btn.addEventListener('click', async e => { e.stopPropagation(); const ped = state.pedidosFornecedor.find(p => p.id === btn.dataset.pedId); if (!ped) return; if (!confirm(`Excluir pedido de "${ped.fornecedor_nome}"?`)) return; await delOne('pedidos_fornecedor', ped.id); state.pedidosFornecedor = state.pedidosFornecedor.filter(p => p.id !== ped.id); renderPedidosFornecedor(); toast('Pedido excluído.'); }); });
+  list.querySelectorAll('.ped-excluir').forEach(btn => { btn.addEventListener('click', async e => { e.stopPropagation(); const ped = state.pedidosFornecedor.find(p => p.id === btn.dataset.pedId); if (!ped) return; if (!confirm(`Excluir pedido de "${ped.fornecedor_nome}"?`)) return; await delOne('pedidos_fornecedor', ped.id); await registrarCompraConfirmada({ ...ped, status: 'CANCELADO' }); state.pedidosFornecedor = state.pedidosFornecedor.filter(p => p.id !== ped.id); renderPedidosFornecedor(); toast('Pedido excluído.'); }); });
 }
 async function recalcularComAjustes() {
   const estoques = await getAll('estoques');
@@ -2233,7 +2233,7 @@ async function recalcularComAjustes() {
 async function zerarAjustes() {
   if (!confirm('Marcar todos os pedidos entregues como FATURADO?')) return;
   let n = 0;
-  for (const ped of state.pedidosFornecedor) { if (ped.status === 'ENTREGUE') { ped.status = 'FATURADO'; await putOne('pedidos_fornecedor', ped); n++; } }
+  for (const ped of state.pedidosFornecedor) { if (ped.status === 'ENTREGUE') { ped.status = 'FATURADO'; await putOne('pedidos_fornecedor', ped); await registrarCompraConfirmada(ped); n++; } }
   renderPedidosFornecedor(); toast(`${n} pedido(s) revertido(s) para Faturado.`);
 }
 let solicCtx = { ativos: [], produtos: [], activeId: null };
@@ -2403,7 +2403,13 @@ document.getElementById('tabelaRelatorio').addEventListener('change', e => {
 });
 const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos'];
 async function registrarCompraConfirmada(ped) {
-  if (!ped || !['FATURADO','ENTREGUE'].includes(ped.status)) return;
+  if (!ped) return;
+  if (!['FATURADO','ENTREGUE'].includes(ped.status)) {
+    const ids = (state.historicoPrecos || []).filter(h => h.pedido_id === ped.id && h.tipo === 'COMPRA').map(h => h.id);
+    for (const id of ids) await delOne('historico_precos', id);
+    state.historicoPrecos = (state.historicoPrecos || []).filter(h => !ids.includes(h.id));
+    return;
+  }
   const data = ped.status === 'ENTREGUE' ? (ped.data_entrega || ped.data_faturamento || ped.data_criacao) : (ped.data_faturamento || ped.data_entrega || ped.data_criacao);
   for (const it of (ped.itens || [])) {
     if (!it.produto_id || it.is_manual || !(Number(it.preco) > 0)) continue;
