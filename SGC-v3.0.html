@@ -311,7 +311,7 @@ th.col-sel { z-index:25; background:#f8fafc; }
         <button id="btnExportXLSX" class="secondary">XLSX</button>
         <button id="btnExportPDF" class="secondary">PDF</button>
         <button id="btnBackupJSON" class="secondary" type="button">Backup completo</button>
-        <label class="secondary" for="fileRestoreJSON" style="display:inline-flex;align-items:center;padding:.5rem .75rem;border-radius:8px;cursor:pointer">Restaurar backup</label>
+        <label class="secondary" for="fileRestoreJSON" style="display:inline-flex;align-items:center;padding:.5rem .75rem;border-radius:8px;cursor:pointer;background:#e2e8f0;color:#0f172a">Restaurar backup</label>
         <input type="file" id="fileRestoreJSON" accept=".json,application/json" hidden>
       </div>
     </header>
@@ -1804,10 +1804,8 @@ function ensureCotacaoItem(produtoId) {
     state.cotacao.itens[produtoId] = { quantidade: qtdSugerida, ultimo_preco: refPreco ? Number(refPreco.preco) : 0, referencia_preco: refPreco ? refPreco.tipo : null, precos: {}, incluir: true };
   } else {
     const item = state.cotacao.itens[produtoId];
-    if (!(Number(item.ultimo_preco) > 0)) {
-      const refPreco = getReferenciaPrecoProduto(produtoId);
-      if (refPreco) { item.ultimo_preco = Number(refPreco.preco); item.referencia_preco = refPreco.tipo; }
-    }
+    const refPreco = getReferenciaPrecoProduto(produtoId);
+    if (refPreco && item.referencia_preco !== 'MANUAL') { item.ultimo_preco = Number(refPreco.preco); item.referencia_preco = refPreco.tipo; }
   }
   return state.cotacao.itens[produtoId];
 }
@@ -1929,7 +1927,7 @@ function renderCotacao() {
     inp.addEventListener('change', () => { const pid = inp.dataset.prodId; const v = Math.max(0, Math.round(Number(inp.value) || 0)); state.cotacao.itens[pid].quantidade = v; inp.value = v; updateCotacaoRow(pid); });
   });
   tabela.querySelectorAll('input[data-field="ultimo_preco"]').forEach(inp => {
-    inp.addEventListener('change', () => { const pid = inp.dataset.prodId; state.cotacao.itens[pid].ultimo_preco = parseNum(inp.value); inp.value = state.cotacao.itens[pid].ultimo_preco ? Number(state.cotacao.itens[pid].ultimo_preco).toFixed(2).replace('.', ',') : ''; updateCotacaoRow(pid); });
+    inp.addEventListener('change', () => { const pid = inp.dataset.prodId; state.cotacao.itens[pid].ultimo_preco = parseNum(inp.value); state.cotacao.itens[pid].referencia_preco = 'MANUAL'; inp.value = state.cotacao.itens[pid].ultimo_preco ? Number(state.cotacao.itens[pid].ultimo_preco).toFixed(2).replace('.', ',') : ''; updateCotacaoRow(pid); });
   });
   tabela.querySelectorAll('input.precos').forEach(inp => {
     inp.addEventListener('change', () => {
@@ -2302,7 +2300,7 @@ async function salvarItemManual() {
   const produto_marca = produto + (marca ? ' - ' + marca : '');
   if (!state.cotacao.itensManuais) state.cotacao.itensManuais = {};
   state.cotacao.itensManuais[id] = { id, produto, marca, produto_marca, codigos, isManual: true };
-  state.cotacao.itens[id] = { quantidade, ultimo_preco: ultimo, precos: {}, incluir: true };
+  state.cotacao.itens[id] = { quantidade, ultimo_preco: ultimo, referencia_preco: 'MANUAL', precos: {}, incluir: true };
   await putOne('cotacoes', state.cotacao);
   fecharModalManual(); renderCotacao(); toast(`Item manual "${produto_marca}" adicionado.`);
 }
