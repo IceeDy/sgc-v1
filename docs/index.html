@@ -2910,6 +2910,7 @@ function setupUI() {
     try {
       const imp = await importFile(file);
       if (imp.quantidade_produtos === 0) toast(`Nenhum produto detectado em "${imp.arquivo}".`, 8000, true);
+      else if (imp.origem === 'AMESA_ESTOQUE') toast(`Posição de estoque àMesa importada: ${imp.quantidade_produtos} produtos e custos atualizados.`);
       else toast(`Importado: ${imp.quantidade_produtos} produtos, ${imp.quantidade_pedidos} pedidos.`);
     } catch (e) { console.error(e); alert('Erro na importação: ' + e.message); }
   });
