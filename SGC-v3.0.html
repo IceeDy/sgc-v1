@@ -1188,6 +1188,9 @@ function calcularTudo(produtos, estoques, pedidos, correlacoes, config, ajustes)
       recebendo: Number(estSafe.recebendo)||0,
       avariado: Number(estSafe.avariado)||0,
       disponivel: Number(estSafe.disponivel ?? estSafe.saldo)||0,
+      unidade_medida: estSafe.unidade_medida || p.unidade_medida || '',
+      custo_medio_liquido: Number(estSafe.custo_medio_liquido)||0,
+      valor_total_estoque: Number(estSafe.valor_total_estoque)||0,
       media_dia, dias_cobertura, status, sugestao };
   });
   if (semEstoque.length) console.warn(`[Cálculo] ${semEstoque.length} produto(s) com pedidos mas SEM estoque cadastrado.`);
@@ -1229,6 +1232,9 @@ const TABLE_COLUMNS = {
     { key:'produto', label:'Produto', type:'text', getValue:p=>p.produto||'', render:p=>p.produto },
     { key:'marca', label:'Marca', type:'text', getValue:p=>p.marca||'', render:p=>p.marca },
     { key:'saldo_importado', label:'Saldo Import.', type:'number', getValue:p=>p.saldo_importado, render:p=>fmtQtd(p.saldo_importado) },
+    { key:'unidade_medida', label:'UN', type:'text', getValue:p=>p.unidade_medida||'', render:p=>p.unidade_medida||'-' },
+    { key:'custo_medio_liquido', label:'Custo Médio Unit.', type:'number', getValue:p=>p.custo_medio_liquido, render:p=>Number(p.custo_medio_liquido)>0?Number(p.custo_medio_liquido).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):'-' },
+    { key:'valor_total_estoque', label:'Valor em Estoque', type:'number', getValue:p=>p.valor_total_estoque, render:p=>Number(p.valor_total_estoque)>0?Number(p.valor_total_estoque).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):'-' },
     { key:'ajuste_estoque', label:'Ajuste', type:'number', getValue:p=>p.ajuste_estoque, render:p=>{
         const v = p.ajuste_estoque || 0;
         if (v === 0) return '<span style="color:#cbd5e1">0</span>';
@@ -2565,7 +2571,7 @@ async function importFile(file) {
 
   let produtos = parsed.produtos, estoques = parsed.estoques, pedidos = parsed.pedidos;
   if (isAmesa) {
-    // Relatório de posição: atualiza somente os itens encontrados e preserva pedidos e cadastros já existentes.
+    // Relatório de posição: atualiza o catálogo/estoque da posição e preserva pedidos existentes e campos complementares dos mesmos produtos.
     const produtosAtuais = await getAll('produtos');
     const estoquesAtuais = await getAll('estoques');
     const produtoMap = new Map(produtosAtuais.map(p => [p.id, p]));
