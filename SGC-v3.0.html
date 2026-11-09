@@ -631,7 +631,7 @@ function toast(msg, ms = 3000, isErr = false, isWarn = false) {
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), ms);
 }
-const DB_NAME = 'analise_compras_db';
+const DB_NAME = 'analise_compras_amesa_db';
 const DB_VERSION = 5;
 let db;
 function openDB() {
@@ -1038,7 +1038,7 @@ function parseAmesaSheet(rows, sheetName) {
   metadata.almoxarifado = String(readMeta('Almoxarifado') || '').trim();
   metadata.localizacao = String(readMeta('Localização') || '').trim();
 
-  const produtosMap = new Map(), estoques = [], precos = [];
+  const produtosMap = new Map(), estoquesMap = new Map(), precos = [];
   let totalLinhas = 0;
   for (let i = headerRow + 1; i < rows.length; i++) {
     const r = rows[i] || [];
@@ -1054,24 +1054,36 @@ function parseAmesaSheet(rows, sheetName) {
     const id = 'amesa:' + codigo;
     const produto = { id, produto:norm(nome), marca:'', produto_marca:norm(nome), codigos:[codigo], codigo_amesa:codigo, unidade_medida:unidade };
     produtosMap.set(id, produto);
-    estoques.push({
-      produto_id:id, saldo:quantidade, media_mes:0, em_compras:0, recebendo:0, avariado:0,
-      disponivel:quantidade, saldo_final:quantidade, unidade_medida:unidade,
-      lote:String(r[cols.lote] ?? '').trim(), custo_medio_liquido:custoUnitario,
-      valor_total_estoque:valorTotal, data_importacao:new Date().toISOString(),
-      data_posicao:metadata.data_posicao ? metadata.data_posicao.toISOString() : null,
-      origem:'RELATORIO_ESTOQUE_AMESA'
-    });
-    if (custoUnitario > 0) precos.push({
-      id:'amesa_stock_' + (metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : 'sem-data') + '_' + codigo,
-      produto_id:id, codigo, produto:norm(nome), marca:'', preco:custoUnitario,
-      data:metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : new Date().toISOString().slice(0,10),
-      criado_em:new Date().toISOString(), tipo:'CUSTO_ESTOQUE', origem:'RELATORIO_ESTOQUE_AMESA',
-      referencia_custo:metadata.tipo_custo
-    });
+    const lote = String(r[cols.lote] ?? '').trim();
+    const estoqueExistente = estoquesMap.get(id);
+    if (estoqueExistente) {
+      estoqueExistente.saldo += quantidade;
+      estoqueExistente.valor_total_estoque += valorTotal;
+      estoqueExistente.custo_medio_liquido = estoqueExistente.saldo > 0 ? estoqueExistente.valor_total_estoque / estoqueExistente.saldo : 0;
+      if (lote) estoqueExistente.lotes.push(lote);
+    } else {
+      estoquesMap.set(id, {
+        produto_id:id, saldo:quantidade, media_mes:0, em_compras:0, recebendo:0, avariado:0,
+        disponivel:quantidade, saldo_final:quantidade, unidade_medida:unidade,
+        lote, lotes:lote ? [lote] : [], custo_medio_liquido:custoUnitario,
+        valor_total_estoque:valorTotal, data_importacao:new Date().toISOString(),
+        data_posicao:metadata.data_posicao ? metadata.data_posicao.toISOString() : null,
+        origem:'RELATORIO_ESTOQUE_AMESA'
+      });
+    }
     totalLinhas++;
   }
   if (!totalLinhas) throw new Error('O cabeçalho foi localizado, mas nenhum produto válido foi encontrado.');
+  const estoques = [...estoquesMap.values()];
+  estoques.forEach(e => {
+    if (e.saldo > 0) precos.push({
+      id:'amesa_stock_' + (metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : 'sem-data') + '_' + e.produto_id,
+      produto_id:e.produto_id, codigo:e.produto_id.replace(/^amesa:/,''), produto:produtosMap.get(e.produto_id)?.produto || '', marca:'',
+      preco:e.custo_medio_liquido, data:metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : new Date().toISOString().slice(0,10),
+      criado_em:new Date().toISOString(), tipo:'CUSTO_ESTOQUE', origem:'RELATORIO_ESTOQUE_AMESA',
+      referencia_custo:metadata.tipo_custo
+    });
+  });
   return { produtos:[...produtosMap.values()], estoques, pedidos:[], correlacoes:[], precos, metadata, origem:'AMESA_ESTOQUE' };
 }
 function importWorkbook(workbook) {
