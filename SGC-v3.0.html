@@ -1887,9 +1887,11 @@ function getProdutosDisponiveisParaCotacao() { return state.produtos.filter(p =>
 function getExcluidos() { return Array.isArray(state.cotacao.excluidos) ? state.cotacao.excluidos : []; }
 function getHistoricoPrecoProduto(produtoId) {
   const historico = (state.historicoPrecos || []).filter(h => String(h.produto_id) === String(produtoId) && Number(h.preco) > 0);
-  const compras = historico.filter(h => h.tipo === 'COMPRA').sort((a,b) => String(b.data || '').localeCompare(String(a.data || '')) || String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
-  const cotacoes = historico.filter(h => h.tipo === 'COTACAO').sort((a,b) => String(b.data || '').localeCompare(String(a.data || '')) || String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
-  return compras[0] || cotacoes[0] || null;
+  const ordenarMaisRecente = lista => lista.sort((a,b) => String(b.data || '').localeCompare(String(a.data || '')) || String(b.criado_em || '').localeCompare(String(a.criado_em || '')));
+  const compras = ordenarMaisRecente(historico.filter(h => h.tipo === 'COMPRA'));
+  const custosEstoque = ordenarMaisRecente(historico.filter(h => h.tipo === 'CUSTO_ESTOQUE'));
+  const cotacoes = ordenarMaisRecente(historico.filter(h => h.tipo === 'COTACAO'));
+  return compras[0] || custosEstoque[0] || cotacoes[0] || null;
 }
 function getReferenciaPrecoProduto(produtoId) { return getHistoricoPrecoProduto(produtoId); }
 function ensureCotacaoItem(produtoId) {
