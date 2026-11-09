@@ -1003,11 +1003,89 @@ function parsePage1Sheet(rows) {
   }
   return { produtos:Object.values(produtos), estoques:Object.values(estoques), pedidos, correlacoes:[] };
 }
+function normalizarCabecalhoExcel(v) {
+  return String(v == null ? '' : v).normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+function parseAmesaSheet(rows, sheetName) {
+  const aliases = {
+    codigo: ['CODIGO'], produto: ['NOMEDOPRODUTO','PRODUTO','DESCRICAO'],
+    lote: ['LOTESUBLOTE','LOTE'], unidade: ['UN','UNIDADE'],
+    quantidade: ['QTDE','QUANTIDADE'], unitario: ['VRUNITARIO','VALORUNITARIO','CUSTOUNITARIO'],
+    total: ['VRTOTAL','VALORTOTAL']
+  };
+  let headerRow = -1, cols = {};
+  for (let r = 0; r < Math.min(rows.length, 40); r++) {
+    const h = (rows[r] || []).map(normalizarCabecalhoExcel);
+    const found = {};
+    Object.entries(aliases).forEach(([key, names]) => { found[key] = h.findIndex(x => names.includes(x)); });
+    if (['codigo','produto','unidade','quantidade','unitario','total'].every(k => found[k] >= 0)) { headerRow = r; cols = found; break; }
+  }
+  if (headerRow < 0) throw new Error('Layout não reconhecido. Esperado: Código, Nome do Produto, UN, Qtde, Vr. Unitário e Vr. Total.');
+  const metadata = { unidade_empresa:'', data_posicao:null, data_processamento:null, fechamento_mes:null, tipo_custo:'', almoxarifado:'', localizacao:'', aba:sheetName };
+  const readMeta = (label) => {
+    const target = normalizarCabecalhoExcel(label);
+    for (let i = 0; i < headerRow; i++) {
+      const row = rows[i] || [];
+      for (let c = 0; c < row.length; c++) if (normalizarCabecalhoExcel(row[c]) === target) return row[c+1] ?? '';
+    }
+    return '';
+  };
+  metadata.unidade_empresa = String(readMeta('Unidade') || '');
+  metadata.data_posicao = parseDate(readMeta('Data da Posição'));
+  metadata.data_processamento = parseDate(readMeta('Data de Processamento'));
+  metadata.fechamento_mes = parseDate(readMeta('Fechamento do Mês'));
+  metadata.tipo_custo = String(readMeta('Tipo de Custo') || '');
+  metadata.almoxarifado = String(readMeta('Almoxarifado') || '').trim();
+  metadata.localizacao = String(readMeta('Localização') || '').trim();
+
+  const produtosMap = new Map(), estoques = [], precos = [];
+  let totalLinhas = 0;
+  for (let i = headerRow + 1; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const codigo = String(r[cols.codigo] ?? '').trim();
+    const nome = String(r[cols.produto] ?? '').trim();
+    if (!codigo || !nome) continue;
+    if (/^(total|valor)$/i.test(codigo)) break;
+    if (!/^\\d+(?:\\.\\d+)*$/.test(codigo)) continue;
+    const quantidade = parseQtd(r[cols.quantidade]);
+    const custoUnitario = parseNum(r[cols.unitario]);
+    const valorTotal = parseNum(r[cols.total]);
+    const unidade = String(r[cols.unidade] ?? '').trim();
+    const id = 'amesa:' + codigo;
+    const produto = { id, produto:norm(nome), marca:'', produto_marca:norm(nome), codigos:[codigo], codigo_amesa:codigo, unidade_medida:unidade };
+    produtosMap.set(id, produto);
+    estoques.push({
+      produto_id:id, saldo:quantidade, media_mes:0, em_compras:0, recebendo:0, avariado:0,
+      disponivel:quantidade, saldo_final:quantidade, unidade_medida:unidade,
+      lote:String(r[cols.lote] ?? '').trim(), custo_medio_liquido:custoUnitario,
+      valor_total_estoque:valorTotal, data_importacao:new Date().toISOString(),
+      data_posicao:metadata.data_posicao ? metadata.data_posicao.toISOString() : null,
+      origem:'RELATORIO_ESTOQUE_AMESA'
+    });
+    if (custoUnitario > 0) precos.push({
+      id:'amesa_stock_' + (metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : 'sem-data') + '_' + codigo,
+      produto_id:id, codigo, produto:norm(nome), marca:'', preco:custoUnitario,
+      data:metadata.data_posicao ? metadata.data_posicao.toISOString().slice(0,10) : new Date().toISOString().slice(0,10),
+      criado_em:new Date().toISOString(), tipo:'CUSTO_ESTOQUE', origem:'RELATORIO_ESTOQUE_AMESA',
+      referencia_custo:metadata.tipo_custo
+    });
+    totalLinhas++;
+  }
+  if (!totalLinhas) throw new Error('O cabeçalho foi localizado, mas nenhum produto válido foi encontrado.');
+  return { produtos:[...produtosMap.values()], estoques, pedidos:[], correlacoes:[], precos, metadata, origem:'AMESA_ESTOQUE' };
+}
 function importWorkbook(workbook) {
   const sheetNames = workbook.SheetNames; let data = null;
+  for (const name of sheetNames) {
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header:1, defval:'', raw:true });
+    const headerText = rows.slice(0,40).flat().map(normalizarCabecalhoExcel);
+    if (headerText.includes('CODIGO') && headerText.includes('NOMEDOPRODUTO') && headerText.includes('QTDE') && headerText.includes('VRUNITARIO') && headerText.includes('VRTOTAL')) {
+      return parseAmesaSheet(rows, name);
+    }
+  }
   if (sheetNames.includes('Base')) { const rows = XLSX.utils.sheet_to_json(workbook.Sheets['Base'], { header:1, defval:'', raw:false }); data = parseBaseSheet(rows); }
   else if (sheetNames.includes('Page 1')) { const rows = XLSX.utils.sheet_to_json(workbook.Sheets['Page 1'], { header:1, defval:'', raw:false }); data = parsePage1Sheet(rows); }
-  else throw new Error('Aba "Base" ou "Page 1" não encontrada. Abas: ' + sheetNames.join(', '));
+  else throw new Error('Layout não reconhecido. Abas: ' + sheetNames.join(', '));
   return data;
 }
 
@@ -2469,18 +2547,39 @@ async function importFile(file) {
   const data = await file.arrayBuffer();
   const wb = XLSX.read(data, { type:'array', cellDates:true });
   const parsed = importWorkbook(wb);
+  const isAmesa = parsed.origem === 'AMESA_ESTOQUE';
   const semSaldo = parsed.estoques.filter(e => !e.saldo || Number(e.saldo) === 0);
-  if (semSaldo.length && parsed.estoques.length) console.warn(`[Import] ${semSaldo.length}/${parsed.estoques.length} produtos com Saldo Inicial = 0.`);
-  const estoques = parsed.estoques;
+  if (semSaldo.length && parsed.estoques.length) console.warn(`[Import] ${semSaldo.length}/${parsed.estoques.length} produtos com saldo zero.`);
+
+  let produtos = parsed.produtos, estoques = parsed.estoques, pedidos = parsed.pedidos;
+  if (isAmesa) {
+    // Relatório de posição: atualiza somente os itens encontrados e preserva pedidos e cadastros já existentes.
+    const produtosAtuais = await getAll('produtos');
+    const estoquesAtuais = await getAll('estoques');
+    const produtoMap = new Map(produtosAtuais.map(p => [p.id, p]));
+    produtos = parsed.produtos.map(p => ({ ...(produtoMap.get(p.id) || {}), ...p }));
+    const estoqueMap = new Map(estoquesAtuais.map(e => [e.produto_id, e]));
+    estoques = parsed.estoques.map(e => ({ ...(estoqueMap.get(e.produto_id) || {}), ...e }));
+    pedidos = state.pedidos.slice();
+    for (const registro of (parsed.precos || [])) await putOne('historico_precos', registro);
+    state.historicoPrecos = await getAll('historico_precos');
+  }
+
   const ajustes = calcAjustesEstoque();
-  const calc = calcularTudo(parsed.produtos, estoques, parsed.pedidos, state.correlacoes, state.config, ajustes);
+  const calc = calcularTudo(produtos, estoques, pedidos, state.correlacoes, state.config, ajustes);
   state.produtos = calc.produtos; state.pedidos = calc.pedidos; state.dashboard = calc.dashboard;
   const totalDatas = state.pedidos.length;
   const datasOk = state.pedidos.filter(p => p.data_pedido instanceof Date && !isNaN(p.data_pedido)).length;
-  if (totalDatas > 0 && datasOk / totalDatas < 0.5) setTimeout(() => alert(`⚠ Apenas ${datasOk} de ${totalDatas} datas foram reconhecidas.`), 300);
-  const imp = { id: Date.now(), arquivo: file.name, data_hora: new Date().toLocaleString('pt-BR'), quantidade_produtos: parsed.produtos.length, quantidade_pedidos: parsed.pedidos.length, quantidade_registros: parsed.produtos.length + parsed.pedidos.length };
+  if (!isAmesa && totalDatas > 0 && datasOk / totalDatas < 0.5) setTimeout(() => alert(`⚠ Apenas ${datasOk} de ${totalDatas} datas foram reconhecidas.`), 300);
+  const imp = {
+    id: Date.now(), arquivo: file.name, data_hora: new Date().toLocaleString('pt-BR'),
+    quantidade_produtos: parsed.produtos.length, quantidade_pedidos: parsed.pedidos.length,
+    quantidade_registros: parsed.produtos.length + parsed.pedidos.length,
+    origem: isAmesa ? 'AMESA_ESTOQUE' : 'IMPORTACAO_PADRAO',
+    metadata: parsed.metadata || null
+  };
   state.importacoes.push(imp);
-  await saveStateToDB(parsed.produtos, estoques, parsed.pedidos);
+  await saveStateToDB(produtos, estoques, pedidos);
   await putAll('importacoes', state.importacoes);
   renderAll();
   const negCount = (state.dashboard && state.dashboard.saldoNegativo) || 0;
