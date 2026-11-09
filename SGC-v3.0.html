@@ -1004,7 +1004,7 @@ function parsePage1Sheet(rows) {
   return { produtos:Object.values(produtos), estoques:Object.values(estoques), pedidos, correlacoes:[] };
 }
 function normalizarCabecalhoExcel(v) {
-  return String(v == null ? '' : v).normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 function parseAmesaSheet(rows, sheetName) {
   const aliases = {
@@ -1046,7 +1046,7 @@ function parseAmesaSheet(rows, sheetName) {
     const nome = String(r[cols.produto] ?? '').trim();
     if (!codigo || !nome) continue;
     if (/^(total|valor)$/i.test(codigo)) break;
-    if (!/^\\d+(?:\\.\\d+)*$/.test(codigo)) continue;
+    if (!/^\d+(?:\.\d+)*$/.test(codigo)) continue;
     const quantidade = parseQtd(r[cols.quantidade]);
     const custoUnitario = parseNum(r[cols.unitario]);
     const valorTotal = parseNum(r[cols.total]);
