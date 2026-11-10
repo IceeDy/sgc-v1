@@ -295,6 +295,8 @@ th.col-sel { z-index:25; background:#f8fafc; }
       <a data-page="risco">Risco de Ruptura</a>
       <a data-page="correlacoes">Correlações</a>
       <a data-page="importacoes">Importações</a>
+      <a data-page="planejamento_amesa">Planejamento àMesa</a>
+      <a data-page="planejamento_amesa">Planejamento àMesa</a>
       <a data-page="validacao">Validação</a>
       <a data-page="config">Configurações</a>
     </nav>
@@ -471,6 +473,21 @@ th.col-sel { z-index:25; background:#f8fafc; }
       <div style="overflow:auto;max-height:70vh;position:relative"><table id="tabelaImportacoes"></table></div>
     </section>
 
+    <section id="planejamento_amesa" class="page">
+      <p class="small">Módulo independente. Cole as tabelas diretamente do Excel (colunas separadas por TAB). O Planejamento guarda regras e decisões manuais; cada Estoque Diário é salvo como fotografia histórica.</p>
+      <div class="cards" id="amesaPlanCards"></div>
+      <div class="card" style="margin-bottom:1rem"><h3>1. Planejamento</h3>
+        <p class="small">15 colunas na ordem da planilha: Classificacao, código, descrição, UN, QTD semanal, QTD Estoque, Estoque MIN semanas, Estoque MIN QTD, Est atual - Estoque mín, Fornecedor, COMPRAR S/N, QTD, Observação, Dia contagem, Responsavel.</p>
+        <textarea id="amesaPlanningPaste" placeholder="Cole aqui a planilha PLANEJAMENTO..."></textarea>
+        <div class="toolbar"><button id="btnAmesaImportPlanning" type="button">Importar / atualizar Planejamento</button><span id="amesaPlanningStatus" class="small"></span></div></div>
+      <div class="card" style="margin-bottom:1rem"><h3>2. Estoque Diário</h3>
+        <p class="small">Cabeçalho esperado: Código, Nome do Produto, UN, Qtde, Vr.Unitário, Vr. Total.</p>
+        <textarea id="amesaStockPaste" placeholder="Cole aqui a planilha ESTOQUE DIÁRIO..."></textarea>
+        <div class="toolbar"><button id="btnAmesaImportStock" type="button">Importar nova fotografia de estoque</button><span id="amesaStockStatus" class="small"></span></div></div>
+      <div class="card" style="margin-bottom:1rem"><h3>3. Conferência por código</h3><div id="amesaReconcile"></div></div>
+      <div class="card"><h3>Planejamento cadastrado</h3><div style="overflow:auto;max-height:55vh"><table id="amesaPlanningTable"></table></div></div>
+    </section>
+
     <section id="validacao" class="page">
       <p class="small">Carregue o arquivo <strong>Analise de Compras v1.xlsx</strong> para comparar os cálculos do sistema com os valores da planilha.</p>
       <div class="toolbar">
@@ -632,7 +649,7 @@ function toast(msg, ms = 3000, isErr = false, isWarn = false) {
   el._t = setTimeout(() => el.classList.remove('show'), ms);
 }
 const DB_NAME = 'analise_compras_amesa_db';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 let db;
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -650,6 +667,8 @@ function openDB() {
       if (!d.objectStoreNames.contains('cotacoes')) d.createObjectStore('cotacoes', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('pedidos_fornecedor')) d.createObjectStore('pedidos_fornecedor', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('historico_precos')) d.createObjectStore('historico_precos', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('planejamento_amesa')) d.createObjectStore('planejamento_amesa', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('estoque_diario_amesa')) d.createObjectStore('estoque_diario_amesa', { keyPath: 'id' });
     };
     req.onsuccess = e => { db = e.target.result; resolve(db); };
     req.onerror = e => reject(e.target.error);
@@ -1559,9 +1578,10 @@ let state = {
   dashboard: {}, charts: {},
   lastRendered: { produtos: [], relatorio: [], pedidos: [], risco: [] },
   lastFilters: { produtos: { q:'', status:'' }, relatorio: { status:'COMPRAR,ATENÇÃO,SEMSTATUS' }, pedidos: {} },
-  corrFilters: { q:'', grupo:'', marca:'' }
+  corrFilters: { q:'', grupo:'', marca:'' },
+  planejamentoAmesa: [], estoqueDiarioAmesa: []
 };
-const pageTitles = { dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
+const pageTitles = { planejamento_amesa:'Planejamento àMesa', dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -1571,6 +1591,7 @@ function showPage(id) {
   if (id === 'pedidos_forn') renderPedidosFornecedor();
   if (id === 'relatorio') renderRelatorio(state.lastFilters.relatorio.status);
   if (id === 'correlacoes') renderCorrelacoes();
+  if (id === 'planejamento_amesa') renderPlanejamentoAmesa();
 }
 function renderDashboard() {
   const d = state.dashboard || {};
@@ -2497,7 +2518,7 @@ document.getElementById('tabelaRelatorio').addEventListener('change', e => {
   if (e.target.matches('.sel-rel')) { const id = e.target.dataset.id; if (e.target.checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; return; }
   if (e.target.id === 'selAllRel') { const checked = e.target.checked; document.querySelectorAll('#tabelaRelatorio .sel-rel').forEach(cb => { cb.checked = checked; const id = cb.dataset.id; if (checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); }); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; }
 });
-const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos'];
+const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos','planejamento_amesa','estoque_diario_amesa'];
 async function registrarCompraConfirmada(ped) {
   if (!ped) return;
   if (!['FATURADO','ENTREGUE'].includes(ped.status)) {
@@ -2546,6 +2567,8 @@ async function loadStateFromDB() {
   await openDB();
   state.produtos = await getAll('produtos'); state.pedidos = await getAll('pedidos'); state.importacoes = await getAll('importacoes'); state.pedidosFornecedor = await getAll('pedidos_fornecedor');
   state.historicoPrecos = await getAll('historico_precos');
+  state.planejamentoAmesa = await getAll('planejamento_amesa');
+  state.estoqueDiarioAmesa = await getAll('estoque_diario_amesa');
   await sincronizarHistoricoCompras();
   state.correlacoesItens = await getAll('correlacoes');
   if (!Array.isArray(state.correlacoesItens) || state.correlacoesItens.length === 0) {
@@ -2606,6 +2629,77 @@ async function importFile(file) {
   if (negCount > 0) setTimeout(() => { toast(`⚠ Após importar: ${negCount} produto(s) com saldo negativo.`, 9000, false, true); }, 500);
   return imp;
 }
+
+// --- Planejamento independente àMesa ---
+function parseAmesaTSV(texto) {
+  const linhas = String(texto || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim() !== '');
+  if (linhas.length < 2) throw new Error('Cole o cabeçalho e pelo menos uma linha de dados.');
+  return linhas.map(l => l.split('\t').map(v => String(v ?? '').trim()));
+}
+function normalizarCodigoAmesa(v) { return String(v ?? '').trim().replace(/\s+/g,''); }
+function importarPlanejamentoAmesa() {
+  const rows = parseAmesaTSV(document.getElementById('amesaPlanningPaste').value);
+  const cab = rows[0].map(v => normalizarCabecalhoExcel(v));
+  const idx = (nome, fallback) => { const i = cab.indexOf(normalizarCabecalhoExcel(nome)); return i >= 0 ? i : fallback; };
+  const c = { classe:idx('Classificacao',0), codigo:1, descricao:2, un:idx('UN',3), semanal:idx('QTD semanal',4), estoque:idx('QTD Estoque',5), semanas:idx('Estoque MIN semanas',6), minimo:idx('Estoque MIN QTD',7), diferenca:idx('Est atual - Estoque mín',8), fornecedor:idx('Fornecedor',9), comprar:idx('COMPRAR S/N',10), qtd:idx('QTD',11), obs:idx('Observação',12), dia:idx('Dia contagem',13), responsavel:idx('Responsavel',14) };
+  const dados = rows.slice(1).map((r,n) => {
+    const codigo = normalizarCodigoAmesa(r[c.codigo]);
+    if (!codigo || !/^\d+(?:\.\d+)*$/.test(codigo)) return null;
+    return { id:codigo, codigo, classificacao:r[c.classe]||'', produto:r[c.descricao]||'', unidade:r[c.un]||'', qtd_semanal:r[c.semanal]??'', qtd_estoque_planilha:r[c.estoque]??'', estoque_min_semanas:r[c.semanas]??'', estoque_min_qtd:r[c.minimo]??'', diferenca_estoque_min:r[c.diferenca]??'', fornecedor:r[c.fornecedor]||'', comprar_sn:r[c.comprar]||'', qtd_compra:r[c.qtd]??'', observacao:r[c.obs]||'', dia_contagem:r[c.dia]||'', responsavel:r[c.responsavel]||'', linha_origem:n+2, atualizado_em:new Date().toISOString() };
+  }).filter(Boolean);
+  if (!dados.length) throw new Error('Nenhum código de produto válido. Confira o cabeçalho e se as colunas estão separadas por TAB.');
+  if (new Set(dados.map(x=>x.codigo)).size !== dados.length) throw new Error('Há códigos repetidos no Planejamento. Corrija as duplicidades antes de importar.');
+  return dados;
+}
+function importarEstoqueDiarioAmesa() {
+  const rows = parseAmesaTSV(document.getElementById('amesaStockPaste').value);
+  const cab = rows[0].map(v => normalizarCabecalhoExcel(v));
+  const find = (...names) => { for (const n of names) { const i=cab.indexOf(normalizarCabecalhoExcel(n)); if(i>=0)return i; } return -1; };
+  const c={codigo:find('Código','Codigo'),produto:find('Nome do Produto'),un:find('UN'),qtd:find('Qtde','Quantidade'),unit:find('Vr.Unitário','Vr Unitario'),total:find('Vr. Total','Vr Total')};
+  if(Object.values(c).some(i=>i<0)) throw new Error('Cabeçalho não reconhecido. Esperado: Código, Nome do Produto, UN, Qtde, Vr.Unitário e Vr. Total.');
+  const dados=rows.slice(1).map((r,n)=>{
+    const codigo=normalizarCodigoAmesa(r[c.codigo]); if(!codigo || !/^\d+(?:\.\d+)*$/.test(codigo)) return null;
+    return { codigo, produto:r[c.produto]||'', unidade:r[c.un]||'', quantidade:r[c.qtd]??'', valor_unitario:r[c.unit]??'', valor_total:r[c.total]??'', linha_origem:n+2 };
+  }).filter(Boolean);
+  if(!dados.length) throw new Error('Nenhum produto válido encontrado no Estoque Diário.');
+  if(new Set(dados.map(x=>x.codigo)).size!==dados.length) throw new Error('O Estoque Diário contém códigos repetidos. Importação cancelada para evitar sobrescritas.');
+  return dados;
+}
+async function salvarPlanejamentoAmesa() {
+  const dados=importarPlanejamentoAmesa();
+  if(!confirm('Substituir a base de Planejamento àMesa por '+dados.length+' produtos? O Estoque Diário e seu histórico não serão alterados.')) return;
+  await putAll('planejamento_amesa',dados); state.planejamentoAmesa=dados;
+  document.getElementById('amesaPlanningStatus').textContent=dados.length+' produtos importados.';
+  renderPlanejamentoAmesa(); toast('Planejamento àMesa importado.');
+}
+async function salvarEstoqueDiarioAmesa() {
+  const dados=importarEstoqueDiarioAmesa(), agora=new Date().toISOString(), snapshotId='amesa_'+Date.now();
+  const novos=dados.map(x=>({...x,id:snapshotId+'_'+x.codigo,snapshot_id:snapshotId,data_importacao:agora}));
+  const anteriores=await getAll('estoque_diario_amesa');
+  await putAll('estoque_diario_amesa',[...anteriores,...novos]); state.estoqueDiarioAmesa=[...anteriores,...novos];
+  document.getElementById('amesaStockStatus').textContent=dados.length+' produtos salvos em '+new Date(agora).toLocaleString('pt-BR')+'.';
+  renderPlanejamentoAmesa(); toast('Fotografia do Estoque Diário salva; histórico anterior mantido.');
+}
+function renderPlanejamentoAmesa() {
+  const plan=state.planejamentoAmesa||[], hist=state.estoqueDiarioAmesa||[];
+  const snaps=[...new Set(hist.map(x=>x.snapshot_id))];
+  let atualId=null;
+  for(const x of hist) if(!atualId || x.data_importacao>(hist.find(y=>y.snapshot_id===atualId)?.data_importacao||'')) atualId=x.snapshot_id;
+  const estoque=hist.filter(x=>x.snapshot_id===atualId), mapa=new Map(estoque.map(x=>[x.codigo,x]));
+  const codPlan=new Set(plan.map(x=>x.codigo)), semEstoque=plan.filter(x=>!mapa.has(x.codigo)), naoPlanejados=estoque.filter(x=>!codPlan.has(x.codigo));
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  document.getElementById('amesaPlanCards').innerHTML=[['Planejados',plan.length],['Estoque importado',estoque.length],['Planejados sem estoque',semEstoque.length],['Estoque não planejado',naoPlanejados.length],['Fotografias históricas',snaps.length]].map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');
+  document.getElementById('amesaPlanningTable').innerHTML='<thead><tr><th>Código</th><th>Produto</th><th>UN</th><th>QTD semanal</th><th>Estoque mín.</th><th>Estoque atual</th><th>Fornecedor</th><th>COMPRAR</th><th>QTD</th><th>Observação</th></tr></thead><tbody>'+plan.map(p=>{const e=mapa.get(p.codigo);return '<tr><td>'+esc(p.codigo)+'</td><td>'+esc(p.produto)+'</td><td>'+esc(p.unidade)+'</td><td>'+esc(p.qtd_semanal)+'</td><td>'+esc(p.estoque_min_qtd)+'</td><td>'+(e?esc(e.quantidade):'<span class="badge ATENÇÃO">SEM DADO</span>')+'</td><td>'+esc(p.fornecedor)+'</td><td>'+esc(p.comprar_sn)+'</td><td>'+esc(p.qtd_compra)+'</td><td>'+esc(p.observacao)+'</td></tr>';}).join('')+'</tbody>';
+  const divs=[];
+  for(const p of plan){const e=mapa.get(p.codigo);if(e){const a=Number(String(p.qtd_estoque_planilha).replace(',','.')),b=Number(String(e.quantidade).replace(',','.'));if(Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)>0.0001)divs.push({codigo:p.codigo,produto:p.produto,plan:a,estoque:b});}}
+  document.getElementById('amesaReconcile').innerHTML='<p><strong>Planejados sem estoque:</strong> '+semEstoque.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>No estoque, não planejados:</strong> '+naoPlanejados.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>Divergências de quantidade entre Planejamento e Estoque Diário:</strong> '+divs.length+'</p>'+(divs.length?'<div style="overflow:auto;max-height:260px"><table><thead><tr><th>Código</th><th>Produto</th><th>Planejamento</th><th>Estoque Diário</th></tr></thead><tbody>'+divs.map(d=>'<tr><td>'+esc(d.codigo)+'</td><td>'+esc(d.produto)+'</td><td>'+esc(d.plan)+'</td><td>'+esc(d.estoque)+'</td></tr>').join('')+'</tbody></table></div>':'');
+}
+function setupPlanejamentoAmesaUI() {
+  document.getElementById('btnAmesaImportPlanning').addEventListener('click',async()=>{try{await salvarPlanejamentoAmesa();}catch(e){alert('Erro no Planejamento: '+e.message);}});
+  document.getElementById('btnAmesaImportStock').addEventListener('click',async()=>{try{await salvarEstoqueDiarioAmesa();}catch(e){alert('Erro no Estoque Diário: '+e.message);}});
+  renderPlanejamentoAmesa();
+}
+
 function renderAll() {
   renderDashboard(); renderProdutos(state.lastFilters.produtos.q, state.lastFilters.produtos.status); renderRelatorio(state.lastFilters.relatorio.status); renderPedidos(state.lastFilters.pedidos); renderRisco(); renderImportacoes(); renderConfig();
   if (document.getElementById('correlacoes').classList.contains('active')) renderCorrelacoes();
@@ -3007,6 +3101,7 @@ function setupUI() {
     renderAll(); toast('Todas as tabelas restauradas ao padrão.');
   });
   setupCorrelacoesUI();
+  setupPlanejamentoAmesaUI();
   document.getElementById('btnValidar').addEventListener('click', async () => {
     const file = document.getElementById('fileValidacao').files[0];
     if (!file) return alert('Selecione o arquivo Analise de Compras v1.xlsx');
