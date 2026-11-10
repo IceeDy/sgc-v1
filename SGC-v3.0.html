@@ -2629,6 +2629,77 @@ async function importFile(file) {
   if (negCount > 0) setTimeout(() => { toast(`⚠ Após importar: ${negCount} produto(s) com saldo negativo.`, 9000, false, true); }, 500);
   return imp;
 }
+
+// --- Planejamento independente àMesa ---
+function parseAmesaTSV(texto) {
+  const linhas = String(texto || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim() !== '');
+  if (linhas.length < 2) throw new Error('Cole o cabeçalho e pelo menos uma linha de dados.');
+  return linhas.map(l => l.split('\t').map(v => String(v ?? '').trim()));
+}
+function normalizarCodigoAmesa(v) { return String(v ?? '').trim().replace(/\s+/g,''); }
+function importarPlanejamentoAmesa() {
+  const rows = parseAmesaTSV(document.getElementById('amesaPlanningPaste').value);
+  const cab = rows[0].map(v => normalizarCabecalhoExcel(v));
+  const idx = (nome, fallback) => { const i = cab.indexOf(normalizarCabecalhoExcel(nome)); return i >= 0 ? i : fallback; };
+  const c = { classe:idx('Classificacao',0), codigo:idx('Produto',1), descricao:idx('Produto',2), un:idx('UN',3), semanal:idx('QTD semanal',4), estoque:idx('QTD Estoque',5), semanas:idx('Estoque MIN semanas',6), minimo:idx('Estoque MIN QTD',7), diferenca:idx('Est atual - Estoque mín',8), fornecedor:idx('Fornecedor',9), comprar:idx('COMPRAR S/N',10), qtd:idx('QTD',11), obs:idx('Observação',12), dia:idx('Dia contagem',13), responsavel:idx('Responsavel',14) };
+  const dados = rows.slice(1).map((r,n) => {
+    const codigo = normalizarCodigoAmesa(r[c.codigo]);
+    if (!codigo || !/^\d+(?:\.\d+)*$/.test(codigo)) return null;
+    return { id:codigo, codigo, classificacao:r[c.classe]||'', produto:r[c.descricao]||'', unidade:r[c.un]||'', qtd_semanal:r[c.semanal]??'', qtd_estoque_planilha:r[c.estoque]??'', estoque_min_semanas:r[c.semanas]??'', estoque_min_qtd:r[c.minimo]??'', diferenca_estoque_min:r[c.diferenca]??'', fornecedor:r[c.fornecedor]||'', comprar_sn:r[c.comprar]||'', qtd_compra:r[c.qtd]??'', observacao:r[c.obs]||'', dia_contagem:r[c.dia]||'', responsavel:r[c.responsavel]||'', linha_origem:n+2, atualizado_em:new Date().toISOString() };
+  }).filter(Boolean);
+  if (!dados.length) throw new Error('Nenhum código de produto válido. Confira o cabeçalho e se as colunas estão separadas por TAB.');
+  if (new Set(dados.map(x=>x.codigo)).size !== dados.length) throw new Error('Há códigos repetidos no Planejamento. Corrija as duplicidades antes de importar.');
+  return dados;
+}
+function importarEstoqueDiarioAmesa() {
+  const rows = parseAmesaTSV(document.getElementById('amesaStockPaste').value);
+  const cab = rows[0].map(v => normalizarCabecalhoExcel(v));
+  const find = (...names) => { for (const n of names) { const i=cab.indexOf(normalizarCabecalhoExcel(n)); if(i>=0)return i; } return -1; };
+  const c={codigo:find('Código','Codigo'),produto:find('Nome do Produto'),un:find('UN'),qtd:find('Qtde','Quantidade'),unit:find('Vr.Unitário','Vr Unitario'),total:find('Vr. Total','Vr Total')};
+  if(Object.values(c).some(i=>i<0)) throw new Error('Cabeçalho não reconhecido. Esperado: Código, Nome do Produto, UN, Qtde, Vr.Unitário e Vr. Total.');
+  const dados=rows.slice(1).map((r,n)=>{
+    const codigo=normalizarCodigoAmesa(r[c.codigo]); if(!codigo || !/^\d+(?:\.\d+)*$/.test(codigo)) return null;
+    return { codigo, produto:r[c.produto]||'', unidade:r[c.un]||'', quantidade:r[c.qtd]??'', valor_unitario:r[c.unit]??'', valor_total:r[c.total]??'', linha_origem:n+2 };
+  }).filter(Boolean);
+  if(!dados.length) throw new Error('Nenhum produto válido encontrado no Estoque Diário.');
+  if(new Set(dados.map(x=>x.codigo)).size!==dados.length) throw new Error('O Estoque Diário contém códigos repetidos. Importação cancelada para evitar sobrescritas.');
+  return dados;
+}
+async function salvarPlanejamentoAmesa() {
+  const dados=importarPlanejamentoAmesa();
+  if(!confirm('Substituir a base de Planejamento àMesa por '+dados.length+' produtos? O Estoque Diário e seu histórico não serão alterados.')) return;
+  await putAll('planejamento_amesa',dados); state.planejamentoAmesa=dados;
+  document.getElementById('amesaPlanningStatus').textContent=dados.length+' produtos importados.';
+  renderPlanejamentoAmesa(); toast('Planejamento àMesa importado.');
+}
+async function salvarEstoqueDiarioAmesa() {
+  const dados=importarEstoqueDiarioAmesa(), agora=new Date().toISOString(), snapshotId='amesa_'+Date.now();
+  const novos=dados.map(x=>({...x,id:snapshotId+'_'+x.codigo,snapshot_id:snapshotId,data_importacao:agora}));
+  const anteriores=await getAll('estoque_diario_amesa');
+  await putAll('estoque_diario_amesa',[...anteriores,...novos]); state.estoqueDiarioAmesa=[...anteriores,...novos];
+  document.getElementById('amesaStockStatus').textContent=dados.length+' produtos salvos em '+new Date(agora).toLocaleString('pt-BR')+'.';
+  renderPlanejamentoAmesa(); toast('Fotografia do Estoque Diário salva; histórico anterior mantido.');
+}
+function renderPlanejamentoAmesa() {
+  const plan=state.planejamentoAmesa||[], hist=state.estoqueDiarioAmesa||[];
+  const snaps=[...new Set(hist.map(x=>x.snapshot_id))];
+  let atualId=null;
+  for(const x of hist) if(!atualId || x.data_importacao>(hist.find(y=>y.snapshot_id===atualId)?.data_importacao||'')) atualId=x.snapshot_id;
+  const estoque=hist.filter(x=>x.snapshot_id===atualId), mapa=new Map(estoque.map(x=>[x.codigo,x]));
+  const codPlan=new Set(plan.map(x=>x.codigo)), semEstoque=plan.filter(x=>!mapa.has(x.codigo)), naoPlanejados=estoque.filter(x=>!codPlan.has(x.codigo));
+  const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  document.getElementById('amesaPlanCards').innerHTML=[['Planejados',plan.length],['Estoque importado',estoque.length],['Planejados sem estoque',semEstoque.length],['Estoque não planejado',naoPlanejados.length],['Fotografias históricas',snaps.length]].map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');
+  document.getElementById('amesaPlanningTable').innerHTML='<thead><tr><th>Código</th><th>Produto</th><th>UN</th><th>QTD semanal</th><th>Estoque mín.</th><th>Estoque atual</th><th>Fornecedor</th><th>COMPRAR</th><th>QTD</th><th>Observação</th></tr></thead><tbody>'+plan.map(p=>{const e=mapa.get(p.codigo);return '<tr><td>'+esc(p.codigo)+'</td><td>'+esc(p.produto)+'</td><td>'+esc(p.unidade)+'</td><td>'+esc(p.qtd_semanal)+'</td><td>'+esc(p.estoque_min_qtd)+'</td><td>'+(e?esc(e.quantidade):'<span class="badge ATENÇÃO">SEM DADO</span>')+'</td><td>'+esc(p.fornecedor)+'</td><td>'+esc(p.comprar_sn)+'</td><td>'+esc(p.qtd_compra)+'</td><td>'+esc(p.observacao)+'</td></tr>';}).join('')+'</tbody>';
+  const divs=[];
+  for(const p of plan){const e=mapa.get(p.codigo);if(e){const a=Number(String(p.qtd_estoque_planilha).replace(',','.')),b=Number(String(e.quantidade).replace(',','.'));if(Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)>0.0001)divs.push({codigo:p.codigo,produto:p.produto,plan:a,estoque:b});}}
+  document.getElementById('amesaReconcile').innerHTML='<p><strong>Planejados sem estoque:</strong> '+semEstoque.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>No estoque, não planejados:</strong> '+naoPlanejados.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>Divergências de quantidade entre Planejamento e Estoque Diário:</strong> '+divs.length+'</p>'+(divs.length?'<div style="overflow:auto;max-height:260px"><table><thead><tr><th>Código</th><th>Produto</th><th>Planejamento</th><th>Estoque Diário</th></tr></thead><tbody>'+divs.map(d=>'<tr><td>'+esc(d.codigo)+'</td><td>'+esc(d.produto)+'</td><td>'+esc(d.plan)+'</td><td>'+esc(d.estoque)+'</td></tr>').join('')+'</tbody></table></div>':'');
+}
+function setupPlanejamentoAmesaUI() {
+  document.getElementById('btnAmesaImportPlanning').addEventListener('click',async()=>{try{await salvarPlanejamentoAmesa();}catch(e){alert('Erro no Planejamento: '+e.message);}});
+  document.getElementById('btnAmesaImportStock').addEventListener('click',async()=>{try{await salvarEstoqueDiarioAmesa();}catch(e){alert('Erro no Estoque Diário: '+e.message);}});
+  renderPlanejamentoAmesa();
+}
+
 function renderAll() {
   renderDashboard(); renderProdutos(state.lastFilters.produtos.q, state.lastFilters.produtos.status); renderRelatorio(state.lastFilters.relatorio.status); renderPedidos(state.lastFilters.pedidos); renderRisco(); renderImportacoes(); renderConfig();
   if (document.getElementById('correlacoes').classList.contains('active')) renderCorrelacoes();
