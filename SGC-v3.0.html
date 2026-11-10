@@ -295,6 +295,7 @@ th.col-sel { z-index:25; background:#f8fafc; }
       <a data-page="risco">Risco de Ruptura</a>
       <a data-page="correlacoes">Correlações</a>
       <a data-page="importacoes">Importações</a>
+      <a data-page="planejamento_amesa">Planejamento àMesa</a>
       <a data-page="validacao">Validação</a>
       <a data-page="config">Configurações</a>
     </nav>
@@ -632,7 +633,7 @@ function toast(msg, ms = 3000, isErr = false, isWarn = false) {
   el._t = setTimeout(() => el.classList.remove('show'), ms);
 }
 const DB_NAME = 'analise_compras_amesa_db';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 let db;
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -650,6 +651,8 @@ function openDB() {
       if (!d.objectStoreNames.contains('cotacoes')) d.createObjectStore('cotacoes', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('pedidos_fornecedor')) d.createObjectStore('pedidos_fornecedor', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('historico_precos')) d.createObjectStore('historico_precos', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('planejamento_amesa')) d.createObjectStore('planejamento_amesa', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('estoque_diario_amesa')) d.createObjectStore('estoque_diario_amesa', { keyPath: 'id' });
     };
     req.onsuccess = e => { db = e.target.result; resolve(db); };
     req.onerror = e => reject(e.target.error);
@@ -1559,9 +1562,10 @@ let state = {
   dashboard: {}, charts: {},
   lastRendered: { produtos: [], relatorio: [], pedidos: [], risco: [] },
   lastFilters: { produtos: { q:'', status:'' }, relatorio: { status:'COMPRAR,ATENÇÃO,SEMSTATUS' }, pedidos: {} },
-  corrFilters: { q:'', grupo:'', marca:'' }
+  corrFilters: { q:'', grupo:'', marca:'' },
+  planejamentoAmesa: [], estoqueDiarioAmesa: []
 };
-const pageTitles = { dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
+const pageTitles = { planejamento_amesa:'Planejamento àMesa', dashboard:'Dashboard', produtos:'Produtos & Estoque', relatorio:'Relatório de Compras', cotacao:'Cotação', pedidos_forn:'Pedidos Fornecedores', pedidos:'Pedidos de Clientes', risco:'Risco de Ruptura', correlacoes:'Correlações', importacoes:'Importações', validacao:'Validação', config:'Configurações' };
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -1571,6 +1575,7 @@ function showPage(id) {
   if (id === 'pedidos_forn') renderPedidosFornecedor();
   if (id === 'relatorio') renderRelatorio(state.lastFilters.relatorio.status);
   if (id === 'correlacoes') renderCorrelacoes();
+  if (id === 'planejamento_amesa') renderPlanejamentoAmesa();
 }
 function renderDashboard() {
   const d = state.dashboard || {};
@@ -2497,7 +2502,7 @@ document.getElementById('tabelaRelatorio').addEventListener('change', e => {
   if (e.target.matches('.sel-rel')) { const id = e.target.dataset.id; if (e.target.checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; return; }
   if (e.target.id === 'selAllRel') { const checked = e.target.checked; document.querySelectorAll('#tabelaRelatorio .sel-rel').forEach(cb => { cb.checked = checked; const id = cb.dataset.id; if (checked) state.selecaoRelatorio.add(id); else state.selecaoRelatorio.delete(id); }); updateSelCountBadge(); const pag = document.getElementById('paginacaoRelatorio'); const total = state.lastRendered.relatorio.length; pag.innerHTML = `<span class="small">Exibindo <strong>${total}</strong> produto(s) · ${state.selecaoRelatorio.size} selecionado(s)</span>`; }
 });
-const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos'];
+const STORES_BACKUP = ['produtos','estoques','pedidos','correlacoes','importacoes','configuracoes','colunas_prefs','fornecedores','cotacoes','pedidos_fornecedor','historico_precos','planejamento_amesa','estoque_diario_amesa'];
 async function registrarCompraConfirmada(ped) {
   if (!ped) return;
   if (!['FATURADO','ENTREGUE'].includes(ped.status)) {
@@ -2546,6 +2551,8 @@ async function loadStateFromDB() {
   await openDB();
   state.produtos = await getAll('produtos'); state.pedidos = await getAll('pedidos'); state.importacoes = await getAll('importacoes'); state.pedidosFornecedor = await getAll('pedidos_fornecedor');
   state.historicoPrecos = await getAll('historico_precos');
+  state.planejamentoAmesa = await getAll('planejamento_amesa');
+  state.estoqueDiarioAmesa = await getAll('estoque_diario_amesa');
   await sincronizarHistoricoCompras();
   state.correlacoesItens = await getAll('correlacoes');
   if (!Array.isArray(state.correlacoesItens) || state.correlacoesItens.length === 0) {
@@ -3007,6 +3014,7 @@ function setupUI() {
     renderAll(); toast('Todas as tabelas restauradas ao padrão.');
   });
   setupCorrelacoesUI();
+  setupPlanejamentoAmesaUI();
   document.getElementById('btnValidar').addEventListener('click', async () => {
     const file = document.getElementById('fileValidacao').files[0];
     if (!file) return alert('Selecione o arquivo Analise de Compras v1.xlsx');
