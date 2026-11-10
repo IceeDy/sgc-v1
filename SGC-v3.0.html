@@ -2641,7 +2641,7 @@ function importarPlanejamentoAmesa() {
   const rows = parseAmesaTSV(document.getElementById('amesaPlanningPaste').value);
   const cab = rows[0].map(v => normalizarCabecalhoExcel(v));
   const idx = (nome, fallback) => { const i = cab.indexOf(normalizarCabecalhoExcel(nome)); return i >= 0 ? i : fallback; };
-  const c = { classe:idx('Classificacao',0), codigo:idx('Produto',1), descricao:idx('Produto',2), un:idx('UN',3), semanal:idx('QTD semanal',4), estoque:idx('QTD Estoque',5), semanas:idx('Estoque MIN semanas',6), minimo:idx('Estoque MIN QTD',7), diferenca:idx('Est atual - Estoque mín',8), fornecedor:idx('Fornecedor',9), comprar:idx('COMPRAR S/N',10), qtd:idx('QTD',11), obs:idx('Observação',12), dia:idx('Dia contagem',13), responsavel:idx('Responsavel',14) };
+  const c = { classe:idx('Classificacao',0), codigo:1, descricao:2, un:idx('UN',3), semanal:idx('QTD semanal',4), estoque:idx('QTD Estoque',5), semanas:idx('Estoque MIN semanas',6), minimo:idx('Estoque MIN QTD',7), diferenca:idx('Est atual - Estoque mín',8), fornecedor:idx('Fornecedor',9), comprar:idx('COMPRAR S/N',10), qtd:idx('QTD',11), obs:idx('Observação',12), dia:idx('Dia contagem',13), responsavel:idx('Responsavel',14) };
   const dados = rows.slice(1).map((r,n) => {
     const codigo = normalizarCodigoAmesa(r[c.codigo]);
     if (!codigo || !/^\d+(?:\.\d+)*$/.test(codigo)) return null;
