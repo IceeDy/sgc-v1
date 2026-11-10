@@ -296,6 +296,7 @@ th.col-sel { z-index:25; background:#f8fafc; }
       <a data-page="correlacoes">Correlações</a>
       <a data-page="importacoes">Importações</a>
       <a data-page="planejamento_amesa">Planejamento àMesa</a>
+      <a data-page="planejamento_amesa">Planejamento àMesa</a>
       <a data-page="validacao">Validação</a>
       <a data-page="config">Configurações</a>
     </nav>
@@ -470,6 +471,21 @@ th.col-sel { z-index:25; background:#f8fafc; }
 
     <section id="importacoes" class="page">
       <div style="overflow:auto;max-height:70vh;position:relative"><table id="tabelaImportacoes"></table></div>
+    </section>
+
+    <section id="planejamento_amesa" class="page">
+      <p class="small">Módulo independente. Cole as tabelas diretamente do Excel (colunas separadas por TAB). O Planejamento guarda regras e decisões manuais; cada Estoque Diário é salvo como fotografia histórica.</p>
+      <div class="cards" id="amesaPlanCards"></div>
+      <div class="card" style="margin-bottom:1rem"><h3>1. Planejamento</h3>
+        <p class="small">15 colunas na ordem da planilha: Classificacao, código, descrição, UN, QTD semanal, QTD Estoque, Estoque MIN semanas, Estoque MIN QTD, Est atual - Estoque mín, Fornecedor, COMPRAR S/N, QTD, Observação, Dia contagem, Responsavel.</p>
+        <textarea id="amesaPlanningPaste" placeholder="Cole aqui a planilha PLANEJAMENTO..."></textarea>
+        <div class="toolbar"><button id="btnAmesaImportPlanning" type="button">Importar / atualizar Planejamento</button><span id="amesaPlanningStatus" class="small"></span></div></div>
+      <div class="card" style="margin-bottom:1rem"><h3>2. Estoque Diário</h3>
+        <p class="small">Cabeçalho esperado: Código, Nome do Produto, UN, Qtde, Vr.Unitário, Vr. Total.</p>
+        <textarea id="amesaStockPaste" placeholder="Cole aqui a planilha ESTOQUE DIÁRIO..."></textarea>
+        <div class="toolbar"><button id="btnAmesaImportStock" type="button">Importar nova fotografia de estoque</button><span id="amesaStockStatus" class="small"></span></div></div>
+      <div class="card" style="margin-bottom:1rem"><h3>3. Conferência por código</h3><div id="amesaReconcile"></div></div>
+      <div class="card"><h3>Planejamento cadastrado</h3><div style="overflow:auto;max-height:55vh"><table id="amesaPlanningTable"></table></div></div>
     </section>
 
     <section id="validacao" class="page">
