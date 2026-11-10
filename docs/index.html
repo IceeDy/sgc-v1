@@ -2689,12 +2689,25 @@ function renderPlanejamentoAmesa() {
   const codPlan=new Set(plan.map(x=>x.codigo)), semEstoque=plan.filter(x=>!mapa.has(x.codigo)), naoPlanejados=estoque.filter(x=>!codPlan.has(x.codigo));
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   document.getElementById('amesaPlanCards').innerHTML=[['Planejados',plan.length],['Estoque importado',estoque.length],['Planejados sem estoque',semEstoque.length],['Estoque não planejado',naoPlanejados.length],['Fotografias históricas',snaps.length]].map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+x[1]+'</div></div>').join('');
-  document.getElementById('amesaPlanningTable').innerHTML='<thead><tr><th>Código</th><th>Produto</th><th>UN</th><th>QTD semanal</th><th>Estoque mín.</th><th>Estoque atual</th><th>Fornecedor</th><th>COMPRAR</th><th>QTD</th><th>Observação</th></tr></thead><tbody>'+plan.map(p=>{const e=mapa.get(p.codigo);return '<tr><td>'+esc(p.codigo)+'</td><td>'+esc(p.produto)+'</td><td>'+esc(p.unidade)+'</td><td>'+esc(p.qtd_semanal)+'</td><td>'+esc(p.estoque_min_qtd)+'</td><td>'+(e?esc(e.quantidade):'<span class="badge ATENÇÃO">SEM DADO</span>')+'</td><td>'+esc(p.fornecedor)+'</td><td>'+esc(p.comprar_sn)+'</td><td>'+esc(p.qtd_compra)+'</td><td>'+esc(p.observacao)+'</td></tr>';}).join('')+'</tbody>';
+  const editFields=[['classificacao','Classificação'],['produto','Produto'],['unidade','UN'],['qtd_semanal','QTD semanal'],['qtd_estoque_planilha','QTD Estoque'],['estoque_min_semanas','Semanas mín.'],['estoque_min_qtd','Estoque mín.'],['diferenca_estoque_min','Diferença'],['fornecedor','Fornecedor'],['comprar_sn','COMPRAR S/N'],['qtd_compra','QTD compra'],['observacao','Observação'],['dia_contagem','Dia contagem'],['responsavel','Responsável']];
+  document.getElementById('amesaPlanningTable').innerHTML='<thead><tr><th>Código</th>'+editFields.map(f=>'<th>'+f[1]+'</th>').join('')+'<th>Estoque Diário</th></tr></thead><tbody>'+plan.map(p=>{const e=mapa.get(p.codigo);return '<tr><td>'+esc(p.codigo)+'</td>'+editFields.map(f=>'<td><input class="amesa-plan-edit" data-code="'+esc(p.codigo)+'" data-field="'+f[0]+'" value="'+esc(p[f[0]])+'" style="width:135px;min-width:90px;padding:4px;font-size:.78rem"></td>').join('')+'<td>'+(e?esc(e.quantidade):'<span class="badge ATENÇÃO">SEM DADO</span>')+'</td></tr>';}).join('')+'</tbody>';
   const divs=[];
   for(const p of plan){const e=mapa.get(p.codigo);if(e){const a=Number(String(p.qtd_estoque_planilha).replace(',','.')),b=Number(String(e.quantidade).replace(',','.'));if(Number.isFinite(a)&&Number.isFinite(b)&&Math.abs(a-b)>0.0001)divs.push({codigo:p.codigo,produto:p.produto,plan:a,estoque:b});}}
   document.getElementById('amesaReconcile').innerHTML='<p><strong>Planejados sem estoque:</strong> '+semEstoque.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>No estoque, não planejados:</strong> '+naoPlanejados.slice(0,80).map(x=>esc(x.codigo+' · '+x.produto)).join(' | ')+'</p><p><strong>Divergências de quantidade entre Planejamento e Estoque Diário:</strong> '+divs.length+'</p>'+(divs.length?'<div style="overflow:auto;max-height:260px"><table><thead><tr><th>Código</th><th>Produto</th><th>Planejamento</th><th>Estoque Diário</th></tr></thead><tbody>'+divs.map(d=>'<tr><td>'+esc(d.codigo)+'</td><td>'+esc(d.produto)+'</td><td>'+esc(d.plan)+'</td><td>'+esc(d.estoque)+'</td></tr>').join('')+'</tbody></table></div>':'');
 }
+async function salvarEdicaoPlanejamentoAmesa(campo) {
+  const codigo=campo.dataset.code, chave=campo.dataset.field;
+  const item=state.planejamentoAmesa.find(x=>x.codigo===codigo);
+  if(!item || !Object.prototype.hasOwnProperty.call(item,chave)) return;
+  const valor=campo.value;
+  if(String(item[chave]??'')===valor) return;
+  item[chave]=valor; item.atualizado_em=new Date().toISOString();
+  await putOne('planejamento_amesa',item);
+  campo.style.borderColor='#16a34a';
+  setTimeout(()=>{campo.style.borderColor='';},700);
+}
 function setupPlanejamentoAmesaUI() {
+  document.getElementById('amesaPlanningTable').addEventListener('change',async e=>{if(e.target.classList.contains('amesa-plan-edit')){try{await salvarEdicaoPlanejamentoAmesa(e.target);}catch(err){alert('Não foi possível salvar a edição: '+err.message);}}});
   document.getElementById('btnAmesaImportPlanning').addEventListener('click',async()=>{try{await salvarPlanejamentoAmesa();}catch(e){alert('Erro no Planejamento: '+e.message);}});
   document.getElementById('btnAmesaImportStock').addEventListener('click',async()=>{try{await salvarEstoqueDiarioAmesa();}catch(e){alert('Erro no Estoque Diário: '+e.message);}});
   renderPlanejamentoAmesa();
